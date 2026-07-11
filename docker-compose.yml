@@ -1,0 +1,21 @@
+services:
+  contexthub:
+    build: .
+    image: contexthub:latest
+    container_name: contexthub
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    environment:
+      # Generate with: openssl rand -base64 32  (put it in a .env file next to
+      # this compose file, or export it in the shell running docker compose)
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?set ADMIN_TOKEN in .env}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      # SQLite database lives here — back this folder up.
+      - ./data:/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
