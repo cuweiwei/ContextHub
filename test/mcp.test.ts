@@ -1,11 +1,12 @@
+import { randomUUID } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { newItemSchema } from '../src/core/types.js';
-import { ADMIN_ACCESS, buildTestEnv } from './helpers.js';
+import { ADMIN_ACCESS, ADMIN_CLIENT, buildTestEnv, idem } from './helpers.js';
 
 function seedItem(overrides: Record<string, unknown>) {
-  return newItemSchema.parse(overrides);
+  return newItemSchema.parse({ idempotency_key: idem(), ...overrides });
 }
 
 describe('MCP endpoint', () => {
@@ -17,39 +18,37 @@ describe('MCP endpoint', () => {
   beforeEach(async () => {
     env = buildTestEnv();
     // hermes is explicitly granted private access; the default agent ceiling is 'normal'
-    agentKey = env.clientsRepo.create({
-      id: 'hermes',
-      name: 'Hermes 秘書',
-      kind: 'agent',
-      scopes: ['read', 'write'],
-      maxSensitivity: 'private',
-    }).apiKey;
-    budgetItemId = env.itemsRepo.insert('finance-app', seedItem({
+    agentKey = env.newClient({ id: 'hermes', principalKind: 'agent', maxSensitivity: 'private' }).apiKey;
+    // app producers registered so their writes are policy-accepted projections
+    env.newClient({ id: 'finance-app', principalKind: 'service' });
+    env.newClient({ id: 'crm-app', principalKind: 'service' });
+    env.newClient({ id: 'work-app', principalKind: 'service' });
+    budgetItemId = env.seed('finance-app', seedItem({
       type: 'state',
       title: '本月餐飲預算已用 82%',
       content: '剩 NT$2,160，距月底 9 天',
       tags: ['預算'],
       source_item_id: 'monthly-food-budget',
-    }), 'app', ADMIN_ACCESS).item.id;
-    env.itemsRepo.insert('crm-app', seedItem({
+    })).item.id;
+    env.seed('crm-app', seedItem({
       type: 'contact',
       title: '小美生日 7/20，想要手沖壺',
       content: '生日禮物要提前準備',
       tags: ['生日'],
       entities: ['person:小美'],
-    }), 'app', ADMIN_ACCESS);
-    env.itemsRepo.insert('crm-app', seedItem({
+    }));
+    env.seed('crm-app', seedItem({
       type: 'note',
       title: '私密備註',
       content: '不該隨便出現的內容',
       sensitivity: 'private',
-    }), 'app', ADMIN_ACCESS);
-    env.itemsRepo.insert('work-app', seedItem({
+    }));
+    env.seed('work-app', seedItem({
       type: 'task',
       title: 'Q3 簡報 7/15 前交',
       content: '給 VP 的 roadmap 簡報',
       occurred_at: new Date(Date.now() + 3 * 86_400_000).toISOString(),
-    }), 'app', ADMIN_ACCESS);
+    }));
     const address = await env.app.listen({ port: 0, host: '127.0.0.1' });
     baseUrl = `${address}/mcp`;
   });
@@ -77,17 +76,26 @@ describe('MCP endpoint', () => {
     await expect(client.connect(transport)).rejects.toThrow();
   });
 
-  it('exposes the seven context tools', async () => {
+  it('exposes the read surfaces and the memory lifecycle tools', async () => {
     const client = await connect(agentKey);
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([
+      'curate_note',
       'get_context_brief',
       'get_context_item',
       'get_current_context',
+      'get_memory_history',
+      'get_operational_state',
       'get_recent_context',
       'list_context_sources',
+      'my_candidates',
+      'operate_task',
       'propose_insight',
+      'propose_successor',
+      'revise_my_candidate',
+      'save_memory',
       'search_context',
+      'update_operational_state',
     ]);
     await client.close();
   });
@@ -104,6 +112,7 @@ describe('MCP endpoint', () => {
     for (const item of result.items) {
       expect(item.authority).toBe('app');
       expect(item.status).toBe('active');
+      expect(item.trust_state).toBe('accepted');
     }
     await client.close();
   });
@@ -123,12 +132,7 @@ describe('MCP endpoint', () => {
     expect(withoutFlag.total_matched).toBe(0);
     await privileged.close();
 
-    const limitedKey = env.clientsRepo.create({
-      id: 'limited-agent',
-      name: 'limited',
-      kind: 'agent',
-      scopes: ['read'],
-    }).apiKey;
+    const limitedKey = env.newClient({ id: 'limited-agent', principalKind: 'agent', scopes: ['read'] }).apiKey;
     const limited = await connect(limitedKey);
     const denied = payload(
       await limited.callTool({
@@ -141,22 +145,61 @@ describe('MCP endpoint', () => {
     await limited.close();
   });
 
+  it('save_memory → candidate, invisible to others until reviewed; read-after-write for the writer', async () => {
+    const client = await connect(agentKey);
+    const stored = payload(
+      await client.callTool({
+        name: 'save_memory',
+        arguments: {
+          type: 'preference',
+          title: '使用者偏好深色主題',
+          content: '多次要求 dark mode',
+          idempotency_key: randomUUID(),
+        },
+      }),
+    );
+    expect(stored.created).toBe(true);
+    expect(stored.trust_state).toBe('candidate');
+
+    // the writer sees it in my_candidates immediately (read-after-write)
+    const mine = payload(await client.callTool({ name: 'my_candidates', arguments: {} }));
+    expect(mine.items.map((i: any) => i.id)).toContain(stored.item_id);
+
+    // other readers do not see it — not in search, not by exact id
+    const otherKey = env.newClient({ id: 'other-agent', principalKind: 'agent' }).apiKey;
+    const other = await connect(otherKey);
+    const search = payload(await other.callTool({ name: 'search_context', arguments: { query: '深色主題', include_candidates: true } }));
+    expect(search.total_matched).toBe(0);
+    const probe: any = await other.callTool({ name: 'get_context_item', arguments: { id: stored.item_id } });
+    expect(probe.isError).toBe(true);
+    await other.close();
+
+    // after the owner accepts, it becomes shared context
+    env.commands.reviewMemory(ADMIN_CLIENT, stored.item_id, { decision: 'accept', expectedRevision: 1 }, randomUUID());
+    const after = payload(await client.callTool({ name: 'search_context', arguments: { query: '深色主題' } }));
+    expect(after.total_matched).toBe(1);
+    expect(after.items[0].trust_state).toBe('accepted');
+    await client.close();
+  });
+
   it('propose_insight → hidden until reviewed → visible after acceptance', async () => {
     const client = await connect(agentKey);
     const stored = payload(
       await client.callTool({
         name: 'propose_insight',
         arguments: {
+          type: 'insight',
           title: '使用者月底會控制餐飲支出',
           content: '從預算資料推導',
           confidence: 0.8,
           derived_from: [budgetItemId],
           source_item_id: 'dining-pattern',
+          idempotency_key: randomUUID(),
         },
       }),
     );
     expect(stored.created).toBe(true);
-    expect(stored.acceptance).toBe('proposed');
+    expect(stored.trust_state).toBe('candidate');
     const item = env.itemsRepo.get(ADMIN_ACCESS, stored.item_id)!;
     expect(item.source).toBe('hermes');
     expect(item.authority).toBe('agent');
@@ -168,23 +211,22 @@ describe('MCP endpoint', () => {
       await client.callTool({ name: 'search_context', arguments: { query: '餐飲支出' } }),
     );
     expect(search.total_matched).toBe(0);
-    // …but auditable with include_proposed
+    // …but the writer can self-audit with include_candidates
     const audit = payload(
       await client.callTool({
         name: 'search_context',
-        arguments: { query: '餐飲支出', include_proposed: true },
+        arguments: { query: '餐飲支出', include_candidates: true },
       }),
     );
     expect(audit.total_matched).toBe(1);
-    expect(audit.items[0].acceptance).toBe('proposed');
+    expect(audit.items[0].trust_state).toBe('candidate');
 
-    // proposals count in current context; accepted insights appear after review
     let current = payload(await client.callTool({ name: 'get_current_context', arguments: {} }));
-    expect(current.proposed_insights).toBe(1);
+    expect(current.pending_candidates).toBe(1);
     expect(current.accepted_insights).toHaveLength(0);
-    env.itemsRepo.review(stored.item_id, { acceptance: 'accepted', reviewedBy: 'admin', expectedRevision: 1 });
+    env.commands.reviewMemory(ADMIN_CLIENT, stored.item_id, { decision: 'accept', expectedRevision: 1 }, randomUUID());
     current = payload(await client.callTool({ name: 'get_current_context', arguments: {} }));
-    expect(current.proposed_insights).toBe(0);
+    expect(current.pending_candidates).toBe(0);
     expect(current.accepted_insights.map((i: any) => i.title)).toContain('使用者月底會控制餐飲支出');
     expect(current.accepted_insights[0].authority).toBe('agent'); // review preserved provenance
     await client.close();
@@ -194,19 +236,25 @@ describe('MCP endpoint', () => {
     const client = await connect(agentKey);
     const bad: any = await client.callTool({
       name: 'propose_insight',
-      arguments: { title: 'x', derived_from: ['does-not-exist'] },
+      arguments: { type: 'insight', title: 'x', derived_from: ['does-not-exist'], idempotency_key: randomUUID() },
     });
     expect(bad.isError).toBe(true);
 
-    const secretId = env.itemsRepo.insert('crm-app', seedItem({
+    const secretId = env.seed('crm-app', seedItem({
       type: 'fact',
       title: '私密事實',
       sensitivity: 'private',
-    }), 'app', ADMIN_ACCESS).item.id;
+    })).item.id;
     const inherited = payload(
       await client.callTool({
         name: 'propose_insight',
-        arguments: { title: '從私密資料推導', sensitivity: 'normal', derived_from: [secretId] },
+        arguments: {
+          type: 'insight',
+          title: '從私密資料推導',
+          sensitivity: 'normal',
+          derived_from: [secretId],
+          idempotency_key: randomUUID(),
+        },
       }),
     );
     expect(inherited.sensitivity).toBe('private'); // cannot summarize private into normal
@@ -214,11 +262,11 @@ describe('MCP endpoint', () => {
   });
 
   it('get_current_context separates tasks, events, and states', async () => {
-    env.itemsRepo.insert('work-app', seedItem({
+    env.seed('work-app', seedItem({
       type: 'event',
       title: '架構 review 會議',
       occurred_at: new Date(Date.now() + 86_400_000).toISOString(),
-    }), 'app', ADMIN_ACCESS);
+    }));
     const client = await connect(agentKey);
     const current = payload(await client.callTool({ name: 'get_current_context', arguments: {} }));
     expect(current.active_tasks.map((i: any) => i.title)).toContain('Q3 簡報 7/15 前交');
@@ -228,35 +276,32 @@ describe('MCP endpoint', () => {
   });
 
   it('read_sources whitelist blocks direct reads AND insight laundering', async () => {
-    // hermes derives an accepted insight from finance data
-    const insight = env.itemsRepo.insert('hermes', seedItem({
+    const insight = env.seed('hermes', seedItem({
       type: 'insight',
       title: '資產配置需要再平衡',
       derived_from: [budgetItemId],
-    }), 'agent', ADMIN_ACCESS);
-    env.itemsRepo.review(insight.item.id, { acceptance: 'accepted', reviewedBy: 'admin', expectedRevision: 1 });
+    }), { authority: 'agent', trust: { trustState: 'candidate', acceptanceMethod: null, policyVersion: 1, ruleId: 'x' } });
+    env.commands.reviewMemory(ADMIN_CLIENT, insight.item.id, { decision: 'accept', expectedRevision: 1 }, randomUUID());
 
-    // this agent may read hermes + crm-app, but NOT finance-app
-    const scopedKey = env.clientsRepo.create({
+    const scopedKey = env.newClient({
       id: 'social-agent',
-      name: 'social',
-      kind: 'agent',
+      principalKind: 'agent',
       scopes: ['read'],
       readSources: ['hermes', 'crm-app'],
     }).apiKey;
     const client = await connect(scopedKey);
 
     const direct = payload(await client.callTool({ name: 'search_context', arguments: { query: '預算' } }));
-    expect(direct.total_matched).toBe(0); // finance-app items invisible
+    expect(direct.total_matched).toBe(0);
 
     const laundered = payload(await client.callTool({ name: 'search_context', arguments: { query: '資產配置' } }));
-    expect(laundered.total_matched).toBe(0); // insight built on finance evidence also invisible
+    expect(laundered.total_matched).toBe(0);
 
     const sources = payload(await client.callTool({ name: 'list_context_sources', arguments: {} }));
     expect(sources.sources.map((s: any) => s.source)).not.toContain('finance-app');
 
     const item: any = await client.callTool({ name: 'get_context_item', arguments: { id: budgetItemId } });
-    expect(item.isError).toBe(true); // 404-equivalent, no existence leak
+    expect(item.isError).toBe(true);
     await client.close();
   });
 
@@ -274,19 +319,99 @@ describe('MCP endpoint', () => {
     await client.close();
   });
 
+  it('operate_task performs typed updates; coordinate-level actions need the extra capability', async () => {
+    const taskId = env.seed('work-app', seedItem({ type: 'task', title: '要操作的任務' })).item.id;
+    const client = await connect(agentKey);
+
+    const done = payload(
+      await client.callTool({
+        name: 'operate_task',
+        arguments: { id: taskId, kind: 'set_status', status: 'completed', expected_revision: 1, idempotency_key: randomUUID() },
+      }),
+    );
+    expect(done.status).toBe('completed');
+    expect(done.revision).toBe(2);
+
+    // agent-default grants task.operate but NOT task.coordinate
+    const denied: any = await client.callTool({
+      name: 'operate_task',
+      arguments: { id: taskId, kind: 'set_priority', priority: 'high', expected_revision: 2, idempotency_key: randomUUID() },
+    });
+    expect(denied.isError).toBe(true);
+    expect(JSON.parse(denied.content[0].text).error).toContain('task.coordinate');
+    await client.close();
+  });
+
+  it('cross-interface read-after-write: REST write is immediately visible over MCP with that revision', async () => {
+    // REST write by a service client
+    const restKey = env.newClient({ id: 'finance-rest', principalKind: 'service' }).apiKey;
+    const res = await env.app.inject({
+      method: 'POST',
+      url: '/v1/items',
+      headers: { authorization: `Bearer ${restKey}` },
+      payload: {
+        type: 'fact',
+        title: '跨介面一致性驗證事實',
+        idempotency_key: randomUUID(),
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const written = res.json().item;
+
+    // a DIFFERENT client over MCP, read started after the ack, sees ≥ that revision
+    const client = await connect(agentKey);
+    const found = payload(
+      await client.callTool({ name: 'search_context', arguments: { query: '跨介面一致性' } }),
+    );
+    expect(found.total_matched).toBe(1);
+    const full = payload(await client.callTool({ name: 'get_context_item', arguments: { id: written.id } }));
+    expect(full.item.revision).toBeGreaterThanOrEqual(written.revision);
+
+    // and the reverse: MCP write visible over REST
+    const saved = payload(
+      await client.callTool({
+        name: 'save_memory',
+        arguments: { type: 'note', title: 'MCP 寫入的筆記', idempotency_key: randomUUID() },
+      }),
+    );
+    const restRead = await env.app.inject({
+      method: 'GET',
+      url: `/v1/items/${saved.item_id}`,
+      headers: { authorization: `Bearer ${agentKey}` },
+    });
+    expect(restRead.statusCode).toBe(200);
+    expect(restRead.json().item.revision).toBeGreaterThanOrEqual(1);
+    await client.close();
+  });
+
   it('denies tools beyond the key scopes', async () => {
-    const readOnlyKey = env.clientsRepo.create({
-      id: 'reader-agent',
-      name: 'reader',
-      kind: 'agent',
-      scopes: ['read'],
-    }).apiKey;
+    const readOnlyKey = env.newClient({ id: 'reader-agent', principalKind: 'agent', scopes: ['read'] }).apiKey;
     const client = await connect(readOnlyKey);
     const result: any = await client.callTool({
       name: 'propose_insight',
-      arguments: { title: 'nope', content: '' },
+      arguments: { type: 'insight', title: 'nope', content: '', idempotency_key: randomUUID() },
     });
     expect(result.isError).toBe(true);
+    await client.close();
+  });
+
+  it('work-namespace MCP connection is denied until granted, and never sees personal data', async () => {
+    const workKey = env.newClient({ id: 'hermes-work', principalKind: 'agent', namespace: 'work', profile: 'none' }).apiKey;
+    const client = await connect(workKey);
+    const denied: any = await client.callTool({ name: 'search_context', arguments: { query: '預算' } });
+    expect(denied.isError).toBe(true);
+    expect(JSON.parse(denied.content[0].text).error).toContain('policy');
+
+    // grant read → still zero personal items visible
+    const current = env.policiesRepo.getCurrent('work')!;
+    env.commands.applyPolicy(ADMIN_CLIENT, 'work', {
+      ...current.policy,
+      grants: [{ client_id: 'hermes-work', capabilities: ['memory.read_accepted'] }],
+    });
+    const search = payload(await client.callTool({ name: 'search_context', arguments: { query: '預算' } }));
+    expect(search.total_matched).toBe(0);
+    const probe: any = await client.callTool({ name: 'get_context_item', arguments: { id: budgetItemId } });
+    expect(probe.isError).toBe(true);
     await client.close();
   });
 });

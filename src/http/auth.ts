@@ -22,13 +22,21 @@ export function extractBearer(req: FastifyRequest): string | null {
   return token || null;
 }
 
+/**
+ * The admin token is a break-glass/administration credential, NOT a
+ * namespace principal: its `namespace` is the empty string and it is never
+ * subject to namespace policies (repos branch on isAdmin explicitly). Daily
+ * review work should use namespace-scoped human reviewer clients instead.
+ */
 export const ADMIN_CLIENT: ClientAuth = {
   id: 'admin',
   name: 'Admin token',
-  kind: 'admin',
+  principalKind: 'human',
+  namespace: '',
   scopes: ['read', 'write', 'review_insight', 'admin'],
   maxSensitivity: 'private',
   readSources: null,
+  credentialVersion: 0,
   isAdmin: true,
 };
 

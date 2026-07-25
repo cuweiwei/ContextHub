@@ -10,31 +10,43 @@ export const SENSITIVITIES = ['normal', 'private'] as const;
 export type Sensitivity = (typeof SENSITIVITIES)[number];
 
 /**
- * Who ORIGINALLY asserted this item. Decided entirely by the server from the
- * authenticated identity — never taken from request bodies (admin excepted).
- * Reviewing an insight NEVER changes its authority: an accepted hermes
- * proposal stays authority=agent. Only the admin human-entry path may create
- * authority=user content.
+ * Who ORIGINALLY asserted this item (provenance). Decided entirely by the
+ * server from the authenticated identity — never taken from request bodies
+ * (admin excepted). Reviewing/accepting an item NEVER changes its authority.
  */
 export const AUTHORITIES = ['user', 'app', 'agent'] as const;
 export type Authority = (typeof AUTHORITIES)[number];
 
-/** Lifecycle state. Expiry/completion/supersession are distinct concepts from deletion. */
+/** Lifecycle state. Expiry/completion/supersession are distinct from deletion. */
 export const STATUSES = ['active', 'completed', 'cancelled', 'superseded'] as const;
 export type ItemStatus = (typeof STATUSES)[number];
 
 /**
- * Review state — only ever set on insights. `authority` records who said it;
- * `acceptance` records whether a reviewer confirmed it. proposed → accepted |
- * rejected, one-way; rejected can never be reopened.
+ * Trust dimension — SEPARATE from provenance (authority) and lifecycle
+ * (status). candidate = written but not yet allowed into the shared default
+ * read surface; accepted = allowed in (via human review, an explicit policy
+ * rule, or a trusted human-entry path); rejected/revoked = final verdicts.
+ * Accepting agent content never disguises it as human-authored.
  */
-export const ACCEPTANCES = ['proposed', 'accepted', 'rejected'] as const;
-export type Acceptance = (typeof ACCEPTANCES)[number];
+export const TRUST_STATES = ['candidate', 'accepted', 'rejected', 'revoked'] as const;
+export type TrustState = (typeof TRUST_STATES)[number];
+
+export const ACCEPTANCE_METHODS = ['human_review', 'policy', 'trusted_import'] as const;
+export type AcceptanceMethod = (typeof ACCEPTANCE_METHODS)[number];
+
+/** What kind of principal holds a credential. */
+export const PRINCIPAL_KINDS = ['agent', 'human', 'service'] as const;
+export type PrincipalKind = (typeof PRINCIPAL_KINDS)[number];
+
+/** semantic = meaning-bearing memory; operational = machine-updated state slot. */
+export const STATE_KINDS = ['semantic', 'operational'] as const;
+export type StateKind = (typeof STATE_KINDS)[number];
 
 /**
- * Item types are conventions, not an enum — apps may introduce their own.
- * Documented conventions: event, fact, state, transaction, note, task,
- * contact, preference, insight.
+ * Item types are conventions, not an enum — writers may introduce their own,
+ * subject to the namespace policy's create_rules. Documented conventions:
+ * event, fact, state, transaction, note, task, contact, preference, insight,
+ * memory.
  */
 export const newItemSchema = z.object({
   type: z.string().min(1).max(64),
@@ -50,22 +62,31 @@ export const newItemSchema = z.object({
   expires_at: isoDateTime.optional(),
   /**
    * Evidence for insights: ids of the NON-insight context items this
-   * inference is based on. Insight-as-evidence is forbidden in the MVP to
-   * prevent transitive provenance/ACL laundering.
+   * inference is based on. Must live in the writer's namespace.
    */
   derived_from: z.array(z.string().min(1)).max(20).default([]),
   /**
    * Stable id of the underlying business object in the source app. Repeated
    * writes with the same (source, source_item_id) follow the per-type update
-   * policy (upsert / dedup-only / append-only) instead of duplicating.
+   * policy (upsert / dedup-only / candidate-refresh) instead of duplicating.
    */
   source_item_id: z.string().min(1).max(200).optional(),
   /** Deep link back to the source of truth in the origin app. */
   source_uri: z.string().max(1000).optional(),
-  idempotency_key: z.string().min(1).max(200).optional(),
+  /**
+   * REQUIRED on every create: AI agents retry on timeouts, and a system of
+   * record must make retries safe. Same key + same payload replays the
+   * original result; same key + different payload is a 409.
+   */
+  idempotency_key: z.string().min(1).max(200),
 });
 export type NewItem = z.infer<typeof newItemSchema>;
 
+/**
+ * PATCH is reserved for non-agent principals maintaining their OWN
+ * projections (apps correcting their own records, human entry). Semantic
+ * content of accepted agent memories cannot be patched — propose a successor.
+ */
 export const patchItemSchema = z
   .object({
     type: z.string().min(1).max(64),
@@ -80,10 +101,7 @@ export const patchItemSchema = z
     occurred_at: isoDateTime.nullable(),
     expires_at: isoDateTime.nullable(),
     source_uri: z.string().max(1000).nullable(),
-    /** Review operation: accepted | rejected only; requires expected_revision. */
-    acceptance: z.enum(['accepted', 'rejected']),
     expected_revision: z.number().int().min(1),
-    review_note: z.string().max(2000),
   })
   .partial();
 export type PatchItem = z.infer<typeof patchItemSchema>;
@@ -91,6 +109,7 @@ export type PatchItem = z.infer<typeof patchItemSchema>;
 export interface ContextItem {
   id: string;
   source: string;
+  namespace: string;
   type: string;
   title: string;
   content: string;
@@ -100,7 +119,12 @@ export interface ContextItem {
   sensitivity: Sensitivity;
   authority: Authority;
   status: ItemStatus;
-  acceptance: Acceptance | null;
+  trust_state: TrustState;
+  acceptance_method: AcceptanceMethod | null;
+  accepted_by: string | null;
+  accepted_at: string | null;
+  acceptance_policy_version: number | null;
+  acceptance_rule_id: string | null;
   confidence: number | null;
   occurred_at: string | null;
   created_at: string;
@@ -110,6 +134,11 @@ export interface ContextItem {
   source_uri: string | null;
   revision: number;
   derived_from: string[];
+  successor_of: string | null;
+  superseded_by: string | null;
+  state_kind: StateKind | null;
+  state_key: string | null;
+  schema_id: string | null;
   reviewed_by: string | null;
   reviewed_at: string | null;
   review_note: string | null;
@@ -125,13 +154,25 @@ export interface CompactItem {
   tags: string[];
   authority: Authority;
   status: ItemStatus;
-  acceptance: Acceptance | null;
+  trust_state: TrustState;
   confidence: number | null;
   occurred_at: string | null;
   created_at: string;
 }
 
 export type SensitivityFilter = 'normal' | 'private' | 'all';
+
+/**
+ * Which trust slice a read surface exposes. Fixed per route/tool by server
+ * code — NEVER derived from a caller-supplied string, so a caller cannot
+ * claim the reviewer inbox by parameter.
+ */
+export type TrustSurface =
+  | 'accepted' // default shared surface
+  | 'plus_own' // accepted + the caller's own candidates
+  | 'plus_all' // accepted + all candidates (reviewer)
+  | 'own_candidates' // only the caller's candidates
+  | 'inbox'; // only candidates, all writers (reviewer)
 
 export interface ListFilters {
   sources?: string[];
@@ -141,8 +182,6 @@ export interface ListFilters {
   since?: string;
   until?: string;
   sensitivity?: SensitivityFilter;
-  /** Proposed insights are excluded from all reads unless explicitly requested. */
-  includeProposed?: boolean;
 }
 
 export const SCOPES = ['read', 'write', 'review_insight', 'admin'] as const;
@@ -151,23 +190,27 @@ export type Scope = (typeof SCOPES)[number];
 export interface ClientAuth {
   id: string;
   name: string;
-  kind: 'app' | 'agent' | 'admin';
+  principalKind: PrincipalKind;
+  /** The single namespace this credential is bound to (server-side, unforgeable). */
+  namespace: string;
   scopes: Scope[];
   /** Server-side read ceiling: private items are invisible beyond it. */
   maxSensitivity: Sensitivity;
-  /** Source whitelist: null = all sources, [] = none. */
+  /** Source whitelist within the namespace: null = all sources, [] = none. */
   readSources: string[] | null;
+  credentialVersion: number;
   isAdmin: boolean;
 }
 
 /**
- * The ACL context every repository read method requires. Constructed from the
- * authenticated client — new routes cannot bypass source/sensitivity rules
- * because the repo refuses to run without one.
+ * The ACL context every repository read method requires. namespace === null
+ * is ONLY valid together with isAdmin — the repo enforces the namespace
+ * predicate for every non-admin reader.
  */
 export interface ReadAccess {
   clientId: string;
   isAdmin: boolean;
+  namespace: string | null;
   readSources: string[] | null;
   maxSensitivity: Sensitivity;
 }
@@ -176,6 +219,7 @@ export function accessFor(client: ClientAuth): ReadAccess {
   return {
     clientId: client.id,
     isAdmin: client.isAdmin,
+    namespace: client.isAdmin ? null : client.namespace,
     readSources: client.readSources,
     maxSensitivity: client.maxSensitivity,
   };
@@ -184,26 +228,43 @@ export function accessFor(client: ClientAuth): ReadAccess {
 export interface ClientInfo {
   id: string;
   name: string;
-  kind: 'app' | 'agent';
+  principal_kind: PrincipalKind;
+  namespace: string;
   scopes: Scope[];
   max_sensitivity: Sensitivity;
   read_sources: string[] | null;
+  credential_version: number;
   created_at: string;
   disabled: boolean;
 }
 
 /**
- * Authority is decided by the server: agents assert as agent, apps as app.
- * Only the admin token (human-entry / import path) may specify an authority,
- * including `user`. Client-supplied authority is otherwise IGNORED.
+ * Authority (provenance) is decided by the server from the principal kind:
+ * agent → agent, service → app, human → user. Only the admin token (import
+ * path) may specify an authority explicitly.
  */
 export function resolveAuthority(client: ClientAuth, requested?: Authority): Authority {
   if (client.isAdmin) return requested ?? 'app';
-  return client.kind === 'agent' ? 'agent' : 'app';
+  if (client.principalKind === 'agent') return 'agent';
+  if (client.principalKind === 'human') return 'user';
+  return 'app';
 }
 
-/** Item types agent clients are allowed to create (insight isolation). */
-export const AGENT_WRITABLE_TYPES = new Set(['insight', 'task', 'note']);
+/**
+ * Default agent memory types, used ONLY to generate seed policy create_rules.
+ * Runtime authorization always reads the namespace policy — there is no
+ * fallback to this constant (fail-closed).
+ */
+export const DEFAULT_AGENT_MEMORY_TYPES = [
+  'insight',
+  'task',
+  'note',
+  'fact',
+  'preference',
+  'contact',
+  'state',
+  'memory',
+] as const;
 
 /** Clamp a requested sensitivity filter to the client's server-side ceiling. */
 export function clampSensitivity(

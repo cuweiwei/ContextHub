@@ -1,22 +1,20 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import type { ClientsRepo } from '../core/clients-repo.js';
-import type { ItemsRepo } from '../core/items-repo.js';
+import type { AppDeps } from '../http/server.js';
 import { toCompact } from '../core/items-repo.js';
-import { RevisionConflictError, SourceItemConflictError, ValidationError } from '../core/errors.js';
 import {
-  accessFor,
-  newItemSchema,
-  type ClientAuth,
-  type ListFilters,
-  type SensitivityFilter,
-} from '../core/types.js';
+  AuditUnavailableError,
+  IdempotencyConflictError,
+  NotFoundError,
+  PolicyDeniedError,
+  RevisionConflictError,
+  SourceItemConflictError,
+  ValidationError,
+} from '../core/errors.js';
+import { newItemSchema, STATUSES, type ClientAuth } from '../core/types.js';
 import { sourcesView } from '../http/routes/sources.js';
 
-export interface McpDeps {
-  itemsRepo: ItemsRepo;
-  clientsRepo: ClientsRepo;
-}
+export type McpDeps = Pick<AppDeps, 'commands' | 'clientsRepo'>;
 
 function jsonResult(payload: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(payload) }] };
@@ -32,25 +30,48 @@ function normalizeIso(value: string | undefined): string | undefined {
   return Number.isNaN(ms) ? undefined : new Date(ms).toISOString();
 }
 
+function isDomainError(err: unknown): err is Error {
+  return (
+    err instanceof ValidationError ||
+    err instanceof NotFoundError ||
+    err instanceof PolicyDeniedError ||
+    err instanceof SourceItemConflictError ||
+    err instanceof RevisionConflictError ||
+    err instanceof IdempotencyConflictError ||
+    err instanceof AuditUnavailableError
+  );
+}
+
 /**
- * Builds a per-request MCP server bound to the authenticated agent client.
- * Tool descriptions are written for the consuming LLM: they say when to call
- * the tool, not just what it does.
+ * Builds a per-request MCP server bound to the authenticated client. The MCP
+ * connection itself is the namespace boundary: this credential reads and
+ * writes ONLY its own namespace, and every call is policy-checked and audited
+ * server-side — tool arguments are intents, never authorizations.
  */
 export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
-  const { itemsRepo } = deps;
-  const server = new McpServer({ name: 'contexthub', version: '0.1.0' });
-  const access = accessFor(client);
+  const { commands } = deps;
+  const server = new McpServer({ name: 'contexthub', version: '0.4.0' });
 
   const canRead = client.scopes.includes('read');
   const canWrite = client.scopes.includes('write');
 
+  function guarded<T extends Record<string, unknown>>(fn: (args: T) => unknown) {
+    return async (args: T) => {
+      try {
+        return jsonResult(fn(args));
+      } catch (err) {
+        if (isDomainError(err)) return errorResult(err.message);
+        throw err;
+      }
+    };
+  }
+
   /**
-   * include_private in tool args is only an intent — actual access is decided
-   * server-side by the client's max_sensitivity policy (and the repo clamps
-   * again regardless of what is passed here).
+   * include_private is an intent — real authorization is the server-side
+   * max_sensitivity ceiling (the repo clamps regardless; this only produces
+   * the explanatory note).
    */
-  function resolveSensitivity(includePrivate: boolean): { sensitivity: SensitivityFilter; note?: string } {
+  function resolveSensitivity(includePrivate: boolean): { sensitivity: 'normal' | 'all'; note?: string } {
     if (!includePrivate) return { sensitivity: 'normal' };
     if (client.maxSensitivity === 'private') return { sensitivity: 'all' };
     return {
@@ -59,18 +80,20 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
     };
   }
 
+  // ---------------- read surfaces ----------------
+
   server.registerTool(
     'search_context',
     {
       title: 'Search cross-app context',
       description:
-        "Full-text search over the user's shared context hub, which aggregates items written by their apps (finance, relationships/CRM, work, notes) and by other agents. Call this BEFORE planning tasks or answering questions about the user's life, schedule, money, people, or work so your answer uses cross-app background instead of guessing. Supports Chinese and English. Pass an array of queries to search several angles in ONE call (results are merged with rank fusion). Every result carries provenance: authority=user (the user said it), app (a source app observed it), agent (another agent inferred it). Unreviewed agent proposals are EXCLUDED by default — set include_proposed only when auditing what agents have inferred. Use get_context_item for the full record.",
+        "Full-text search over this namespace of the user's memory hub (apps' projections, accepted agent memories). Call this BEFORE planning or answering questions about the user's life, schedule, money, people, or work. Supports Chinese and English; pass an array of queries to search several angles in ONE call (rank-fusion merged). Results carry provenance (authority=user/app/agent) and trust_state. Unreviewed candidates are EXCLUDED by default; include_candidates adds YOUR OWN pending proposals (reviewers see all). Use get_context_item for the full record.",
       inputSchema: {
         query: z
           .union([z.string(), z.array(z.string()).min(1).max(10)])
           .describe('Search query, or up to 10 queries to merge in one call (e.g. ["財務規劃", "報稅"])'),
         types: z.array(z.string()).optional().describe('Filter by item types, e.g. ["transaction","event"]'),
-        sources: z.array(z.string()).optional().describe('Filter by source app ids (see list_context_sources)'),
+        sources: z.array(z.string()).optional().describe('Filter by source client ids (see list_context_sources)'),
         tags: z.array(z.string()).optional().describe('Only items carrying ALL of these tags'),
         since: z.string().optional().describe('Only items on/after this ISO 8601 datetime'),
         until: z.string().optional().describe('Only items on/before this ISO 8601 datetime'),
@@ -79,37 +102,40 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
           .boolean()
           .default(false)
           .describe('Request private items too. Honored only if this client is authorized server-side.'),
-        include_proposed: z
+        include_candidates: z
           .boolean()
           .default(false)
-          .describe('Also return UNREVIEWED agent proposals (acceptance=proposed). For auditing/debugging only — do not treat them as facts.'),
+          .describe('Also return your own UNREVIEWED candidates. For self-auditing — do not treat them as facts.'),
       },
     },
-    async (args) => {
-      if (!canRead) return errorResult('this API key lacks the "read" scope');
+    guarded((args: any) => {
+      if (!canRead) throw new PolicyDeniedError('this API key lacks the "read" scope');
       const queries = typeof args.query === 'string' ? [args.query] : args.query;
-      const { sensitivity, note } = resolveSensitivity(args.include_private);
-      const filters: ListFilters = {
-        types: args.types,
-        sources: args.sources,
-        tags: args.tags,
-        since: normalizeIso(args.since),
-        until: normalizeIso(args.until),
-        sensitivity,
-        includeProposed: args.include_proposed,
-      };
-      const { items, totalMatched } = itemsRepo.search(access, { queries, filters, limit: args.limit });
-      return jsonResult({
+      const { sensitivity, note: privacyNote } = resolveSensitivity(args.include_private);
+      const { items, totalMatched, note } = commands.search(client, {
+        queries,
+        filters: {
+          types: args.types,
+          sources: args.sources,
+          tags: args.tags,
+          since: normalizeIso(args.since),
+          until: normalizeIso(args.until),
+          sensitivity,
+        },
+        limit: args.limit,
+        includeCandidates: args.include_candidates,
+      });
+      return {
         total_matched: totalMatched,
         returned: items.length,
-        note,
+        note: [privacyNote, note].filter(Boolean).join('; ') || undefined,
         hint:
           totalMatched > items.length
             ? 'More items matched than returned; narrow with types/sources/tags/since instead of paging.'
             : undefined,
         items,
-      });
-    },
+      };
+    }),
   );
 
   server.registerTool(
@@ -117,18 +143,17 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
     {
       title: 'Current state of the user',
       description:
-        "What is true for the user RIGHT NOW. current ≡ status=active, not deleted, not expired — concretely: active tasks (nearest deadline first), future events, latest durable states/facts/preferences, and ACCEPTED insights only (reviewed and confirmed). Unreviewed proposals appear only as a count. Transactions are history, not current context. Use this when planning or prioritizing; search_context covers history.",
+        'What is true for the user RIGHT NOW in this namespace: active tasks (nearest deadline first), future events, latest durable states/facts/preferences/memories, and accepted insights — all trust_state=accepted only. Your own unreviewed candidates appear only as a count. Use when planning or prioritizing; search_context covers history.',
       inputSchema: {
         per_section: z.number().int().min(1).max(25).default(10),
         include_private: z.boolean().default(false),
       },
     },
-    async (args) => {
-      if (!canRead) return errorResult('this API key lacks the "read" scope');
+    guarded((args: any) => {
+      if (!canRead) throw new PolicyDeniedError('this API key lacks the "read" scope');
       const { sensitivity, note } = resolveSensitivity(args.include_private);
-      const current = itemsRepo.currentContext(access, { sensitivity, perSection: args.per_section });
-      return jsonResult({ note, ...current });
-    },
+      return { note, ...commands.currentContext(client, { sensitivity, perSection: args.per_section }) };
+    }),
   );
 
   server.registerTool(
@@ -136,39 +161,40 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
     {
       title: 'Recent context timeline',
       description:
-        "Chronological timeline of what recently happened across the user's apps (most recent first). Use it to catch up when you have no specific search term. For 'what is true now' prefer get_current_context; for a structured digest prefer get_context_brief. Unreviewed agent proposals are excluded unless include_proposed is set.",
+        "Chronological timeline of what recently happened in this namespace (most recent first). Use to catch up without a specific search term. For 'what is true now' prefer get_current_context; for a structured digest prefer get_context_brief.",
       inputSchema: {
         days: z.number().int().min(1).max(365).default(7).describe('Look-back window in days'),
-        sources: z.array(z.string()).optional().describe('Filter by source app ids'),
-        types: z.array(z.string()).optional().describe('Filter by item types'),
+        sources: z.array(z.string()).optional(),
+        types: z.array(z.string()).optional(),
         limit: z.number().int().min(1).max(100).default(20),
         include_private: z.boolean().default(false),
-        include_proposed: z.boolean().default(false),
+        include_candidates: z.boolean().default(false),
       },
     },
-    async (args) => {
-      if (!canRead) return errorResult('this API key lacks the "read" scope');
+    guarded((args: any) => {
+      if (!canRead) throw new PolicyDeniedError('this API key lacks the "read" scope');
       const since = new Date(Date.now() - args.days * 86_400_000).toISOString();
-      const { sensitivity, note } = resolveSensitivity(args.include_private);
-      const { items, nextCursor } = itemsRepo.list(access, {
+      const { sensitivity, note: privacyNote } = resolveSensitivity(args.include_private);
+      const { items, nextCursor, note } = commands.recent(client, {
+        days: args.days,
         filters: {
           sources: args.sources,
           types: args.types,
           since,
           sensitivity,
-          includeProposed: args.include_proposed,
         },
         limit: args.limit,
         sort: 'occurred',
+        includeCandidates: args.include_candidates,
       });
-      return jsonResult({
+      return {
         window_days: args.days,
         returned: items.length,
         has_more: Boolean(nextCursor),
-        note,
+        note: [privacyNote, note].filter(Boolean).join('; ') || undefined,
         items: items.map((it) => toCompact(it)),
-      });
-    },
+      };
+    }),
   );
 
   server.registerTool(
@@ -176,82 +202,52 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
     {
       title: 'Get full context item',
       description:
-        'Fetch one context item in full — complete content, structured data payload, entities, provenance (authority/acceptance/derived_from evidence ids), review verdict. Use after search/timeline/current when a snippet is not enough. Your own rejected proposals are fetchable by id, including the review_note explaining why.',
+        'Fetch one item in full — content, data payload, provenance (authority, evidence), trust_state, acceptance metadata, supersession links, review verdict. Your own rejected proposals are fetchable by id, including the review_note explaining why.',
       inputSchema: {
         id: z.string().describe('Item id from a previous search/timeline result'),
       },
     },
-    async (args) => {
-      if (!canRead) return errorResult('this API key lacks the "read" scope');
-      const item = itemsRepo.get(access, args.id);
-      if (!item) return errorResult(`no item with id "${args.id}"`);
-      return jsonResult({ item });
-    },
+    guarded((args: any) => {
+      if (!canRead) throw new PolicyDeniedError('this API key lacks the "read" scope');
+      const item = commands.getItem(client, args.id);
+      if (!item) throw new NotFoundError(`no item with id "${args.id}"`);
+      return { item };
+    }),
   );
 
   server.registerTool(
-    'propose_insight',
+    'get_memory_history',
     {
-      title: 'Propose an insight into the hub',
+      title: 'Version history of a memory',
       description:
-        `Propose a durable conclusion you derived (recorded as source "${client.id}", authority=agent, acceptance=proposed). Proposals are INVISIBLE to normal reads until a human reviewer accepts them, so write them to be reviewed: honest confidence, and cite the NON-insight context items your inference is based on via derived_from (insights cannot cite other insights). If any evidence is private, the proposal automatically becomes private. Use when you learn something lasting — a preference you inferred, a follow-up, a pattern. Do NOT store transient conversation details or restate existing facts. To update a still-unreviewed proposal, reuse its source_item_id; once reviewed it is immutable — propose anew with a new source_item_id.`,
+        'Full audit trail of one item: every version snapshot (who changed what, when) and every review/adjudication event. Use to understand how a memory evolved or why it was accepted/rejected/superseded.',
       inputSchema: {
-        type: z
-          .enum(['insight', 'task', 'note'])
-          .default('insight')
-          .describe('insight = your inference (goes through review); task = a follow-up you created; note = supporting notes'),
-        title: z.string().min(1).max(500).describe('Short one-line summary'),
-        content: z.string().max(50_000).default('').describe('Full detail, plain text or markdown'),
-        tags: z.array(z.string()).max(50).default([]),
-        entities: z
-          .array(z.string())
-          .max(50)
-          .default([])
-          .describe('Related entities as "kind:name", e.g. ["person:王小明", "project:Q3-report"]'),
-        confidence: z
-          .number()
-          .min(0)
-          .max(1)
-          .default(0.7)
-          .describe('How sure you are — shown to the reviewer and weighted in ranking'),
-        derived_from: z
-          .array(z.string())
-          .max(20)
-          .default([])
-          .describe('Ids of the NON-insight context items this inference is based on'),
-        occurred_at: z.string().optional().describe('When the underlying event happened (ISO 8601)'),
-        sensitivity: z.enum(['normal', 'private']).default('normal'),
-        source_item_id: z
-          .string()
-          .optional()
-          .describe('Stable key for this proposal; reuse to refresh it while still unreviewed'),
-        idempotency_key: z.string().optional().describe('Stable key to avoid duplicates when retrying'),
+        id: z.string().describe('Item id'),
       },
     },
-    async (args) => {
-      if (!canWrite) return errorResult('this API key lacks the "write" scope');
-      const parsed = newItemSchema.safeParse(args);
-      if (!parsed.success) return errorResult(parsed.error.message);
-      try {
-        const { item, created } = itemsRepo.insert(client.id, parsed.data, 'agent', access);
-        return jsonResult({
-          item_id: item.id,
-          created,
-          revision: item.revision,
-          acceptance: item.acceptance,
-          sensitivity: item.sensitivity,
-        });
-      } catch (err) {
-        if (
-          err instanceof ValidationError ||
-          err instanceof SourceItemConflictError ||
-          err instanceof RevisionConflictError
-        ) {
-          return errorResult(err.message);
-        }
-        throw err;
-      }
+    guarded((args: any) => {
+      if (!canRead) throw new PolicyDeniedError('this API key lacks the "read" scope');
+      const history = commands.getHistory(client, args.id);
+      if (!history) throw new NotFoundError(`no item with id "${args.id}"`);
+      return history;
+    }),
+  );
+
+  server.registerTool(
+    'my_candidates',
+    {
+      title: 'Your pending proposals',
+      description:
+        'Lists YOUR memories still waiting for review (trust_state=candidate). They are invisible to every other reader until accepted. Use to avoid duplicate proposals and to refresh stale ones (revise_my_candidate).',
+      inputSchema: {
+        limit: z.number().int().min(1).max(100).default(20),
+      },
     },
+    guarded((args: any) => {
+      if (!canRead) throw new PolicyDeniedError('this API key lacks the "read" scope');
+      const items = commands.listCandidates(client, 'my', args.limit);
+      return { returned: items.length, items: items.map((it) => toCompact(it)) };
+    }),
   );
 
   server.registerTool(
@@ -259,36 +255,289 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
     {
       title: 'List context sources',
       description:
-        'Lists every app/agent feeding the hub that YOU are authorized to read, with item counts per type and last activity. Call this on first contact with the hub to learn what kinds of context exist before searching.',
+        'Lists every client feeding THIS namespace that you are authorized to read, with item counts per type and last activity. Call on first contact with the hub.',
       inputSchema: {},
     },
-    async () => {
-      if (!canRead) return errorResult('this API key lacks the "read" scope');
-      return jsonResult({ sources: sourcesView(deps, access) });
-    },
+    guarded(() => {
+      if (!canRead) throw new PolicyDeniedError('this API key lacks the "read" scope');
+      return { sources: sourcesView(deps, client) };
+    }),
   );
 
   server.registerTool(
     'get_context_brief',
     {
-      title: 'Cross-app situational brief',
+      title: 'Cross-source situational brief',
       description:
-        "One-call digest of the user's recent situation: latest highlights from every source app plus per-source stats, optionally weighted toward a focus topic. Deterministic aggregation (no hidden LLM). Call this ONCE at the start of planning work — it usually replaces several list/search round trips. Pair with get_current_context for open tasks and standing facts.",
+        "One-call digest of the user's recent situation in this namespace: latest highlights per source plus stats, optionally weighted toward a focus topic. Deterministic aggregation (no hidden LLM). Call ONCE at the start of planning work.",
       inputSchema: {
-        days: z.number().int().min(1).max(90).default(14).describe('Look-back window in days'),
-        focus: z
-          .string()
-          .optional()
-          .describe('Optional topic keyword(s); adds a focused search section to the brief'),
+        days: z.number().int().min(1).max(90).default(14),
+        focus: z.string().optional().describe('Optional topic keyword(s); adds a focused search section'),
         include_private: z.boolean().default(false),
       },
     },
-    async (args) => {
-      if (!canRead) return errorResult('this API key lacks the "read" scope');
+    guarded((args: any) => {
+      if (!canRead) throw new PolicyDeniedError('this API key lacks the "read" scope');
       const { sensitivity, note } = resolveSensitivity(args.include_private);
-      const brief = itemsRepo.brief(access, { days: args.days, focus: args.focus, sensitivity });
-      return jsonResult(note ? { note, ...brief } : brief);
+      const brief = commands.brief(client, { days: args.days, focus: args.focus, sensitivity });
+      return note ? { note, ...brief } : brief;
+    }),
+  );
+
+  // ---------------- memory lifecycle ----------------
+
+  const saveMemoryShape = {
+    type: z
+      .string()
+      .min(1)
+      .max(64)
+      .describe(
+        'Memory type: fact/preference/contact/state/memory for durable knowledge, insight for reviewed inferences, task for follow-ups, note for free text. The namespace policy decides which types you may create and whether they start as candidate (reviewed later) or accepted.',
+      ),
+    title: z.string().min(1).max(500).describe('Short one-line summary'),
+    content: z.string().max(50_000).default('').describe('Full detail, plain text or markdown'),
+    data: z.unknown().optional().describe('Optional structured JSON payload'),
+    tags: z.array(z.string()).max(50).default([]),
+    entities: z
+      .array(z.string())
+      .max(50)
+      .default([])
+      .describe('Related entities as "kind:name", e.g. ["person:王小明", "project:Q3-report"]'),
+    confidence: z.number().min(0).max(1).optional().describe('How sure you are (insights)'),
+    derived_from: z
+      .array(z.string())
+      .max(20)
+      .default([])
+      .describe('Insights only: ids of the NON-insight items this inference is based on'),
+    occurred_at: z.string().optional().describe('When the underlying event happened (ISO 8601)'),
+    expires_at: z.string().optional().describe('Optional TTL (ISO 8601)'),
+    sensitivity: z.enum(['normal', 'private']).default('normal'),
+    status: z.enum(STATUSES).default('active'),
+    source_item_id: z
+      .string()
+      .optional()
+      .describe('Stable key: reuse it to refresh YOUR still-unreviewed candidate in place'),
+    idempotency_key: z
+      .string()
+      .min(1)
+      .max(200)
+      .describe('REQUIRED: a UUID you generate per logical write; retries with the same key are safe'),
+  };
+
+  server.registerTool(
+    'save_memory',
+    {
+      title: 'Save a memory',
+      description:
+        `Write a durable memory into the hub (recorded as source "${client.id}", provenance authority=${client.principalKind === 'agent' ? 'agent' : 'user/app'}). Depending on namespace policy your write starts as trust_state=candidate — INVISIBLE to other readers until the owner reviews it — or accepted. Save things worth remembering across sessions: stable user preferences, durable facts, project context, follow-up tasks. Do NOT store transient conversation details. Generate a fresh UUID idempotency_key per logical memory; reuse source_item_id to refresh a still-unreviewed candidate.`,
+      inputSchema: saveMemoryShape,
     },
+    guarded((args: any) => {
+      if (!canWrite) throw new PolicyDeniedError('this API key lacks the "write" scope');
+      const parsed = newItemSchema.safeParse(args);
+      if (!parsed.success) throw new ValidationError(parsed.error.message);
+      const { item, created, replayed } = commands.createMemory(client, parsed.data);
+      return {
+        item_id: item.id,
+        created,
+        replayed,
+        revision: item.revision,
+        trust_state: item.trust_state,
+        sensitivity: item.sensitivity,
+        note:
+          item.trust_state === 'candidate'
+            ? 'saved as a candidate — invisible to other readers until the owner accepts it'
+            : undefined,
+      };
+    }),
+  );
+
+  server.registerTool(
+    'propose_insight',
+    {
+      title: 'Propose an insight',
+      description:
+        `Propose a durable conclusion you inferred (source "${client.id}", authority=agent, trust_state=candidate). Candidates are INVISIBLE to normal reads until a human reviewer accepts them, so write to be reviewed: honest confidence, and cite the NON-insight items your inference rests on via derived_from. Private evidence makes the proposal private. Once reviewed it is immutable — propose anew or use propose_successor.`,
+      inputSchema: saveMemoryShape,
+    },
+    guarded((args: any) => {
+      if (!canWrite) throw new PolicyDeniedError('this API key lacks the "write" scope');
+      const parsed = newItemSchema.safeParse({ ...args, type: 'insight' });
+      if (!parsed.success) throw new ValidationError(parsed.error.message);
+      const { item, created, replayed } = commands.createMemory(client, parsed.data);
+      return {
+        item_id: item.id,
+        created,
+        replayed,
+        revision: item.revision,
+        trust_state: item.trust_state,
+        sensitivity: item.sensitivity,
+      };
+    }),
+  );
+
+  server.registerTool(
+    'revise_my_candidate',
+    {
+      title: 'Revise your pending proposal',
+      description:
+        'Update YOUR still-unreviewed candidate in place (title/content/data/tags/confidence). Requires expected_revision from a fresh read. Once reviewed, items are immutable — use propose_successor instead.',
+      inputSchema: {
+        id: z.string(),
+        title: z.string().min(1).max(500).optional(),
+        content: z.string().max(50_000).optional(),
+        data: z.unknown().optional(),
+        tags: z.array(z.string()).max(50).optional(),
+        confidence: z.number().min(0).max(1).optional(),
+        expected_revision: z.number().int().min(1),
+        idempotency_key: z.string().min(1).max(200),
+      },
+    },
+    guarded((args: any) => {
+      if (!canWrite) throw new PolicyDeniedError('this API key lacks the "write" scope');
+      const { id, idempotency_key, ...patch } = args;
+      const { item } = commands.reviseCandidate(client, id, patch, idempotency_key);
+      return { item_id: item.id, revision: item.revision, trust_state: item.trust_state };
+    }),
+  );
+
+  server.registerTool(
+    'propose_successor',
+    {
+      title: 'Propose replacing an accepted memory',
+      description:
+        'When an ACCEPTED memory is outdated or wrong, propose its replacement. The successor starts as a candidate; if the owner accepts it, the old memory is atomically marked superseded (single-winner conflict adjudication, recorded in the hub). The predecessor stays current until then.',
+      inputSchema: {
+        predecessor_id: z.string().describe('Id of the accepted item to replace'),
+        ...saveMemoryShape,
+      },
+    },
+    guarded((args: any) => {
+      if (!canWrite) throw new PolicyDeniedError('this API key lacks the "write" scope');
+      const { predecessor_id, ...rest } = args;
+      const parsed = newItemSchema.safeParse(rest);
+      if (!parsed.success) throw new ValidationError(parsed.error.message);
+      const { item, created, replayed } = commands.proposeSuccessor(client, predecessor_id, parsed.data);
+      return {
+        item_id: item.id,
+        created,
+        replayed,
+        successor_of: item.successor_of,
+        trust_state: item.trust_state,
+        note: 'candidate successor — the predecessor stays current until the owner accepts',
+      };
+    }),
+  );
+
+  server.registerTool(
+    'operate_task',
+    {
+      title: 'Operate on a task',
+      description:
+        'Typed task operations: set_status / set_progress / set_blocked / complete_checklist_item (and, if granted, set_due_date / set_priority / set_assignee / set_dependencies). Semantic fields (title, description, goal) are immutable here — propose a successor to change what the task MEANS. Requires expected_revision.',
+      inputSchema: {
+        id: z.string(),
+        kind: z.enum([
+          'set_status',
+          'set_progress',
+          'set_blocked',
+          'complete_checklist_item',
+          'set_due_date',
+          'set_priority',
+          'set_assignee',
+          'set_dependencies',
+        ]),
+        status: z.enum(STATUSES).optional(),
+        progress: z.number().min(0).max(100).optional(),
+        blocked_reason: z.string().max(2000).nullable().optional(),
+        checklist_index: z.number().int().min(0).optional(),
+        due_date: z.string().nullable().optional(),
+        priority: z.enum(['low', 'medium', 'high']).nullable().optional(),
+        assignee: z.string().max(200).nullable().optional(),
+        dependencies: z.array(z.string()).max(50).optional(),
+        expected_revision: z.number().int().min(1),
+        idempotency_key: z.string().min(1).max(200),
+      },
+    },
+    guarded((args: any) => {
+      if (!canWrite) throw new PolicyDeniedError('this API key lacks the "write" scope');
+      const { id, idempotency_key, due_date, ...action } = args;
+      const { item } = commands.operateTask(
+        client,
+        id,
+        { ...action, due_date: due_date === undefined ? undefined : normalizeIso(due_date ?? undefined) ?? null },
+        idempotency_key,
+      );
+      return { item_id: item.id, revision: item.revision, status: item.status, data: item.data };
+    }),
+  );
+
+  server.registerTool(
+    'curate_note',
+    {
+      title: 'Curate a note',
+      description:
+        'Organize a note WITHOUT touching its content: tags, collection, archived flag, related item links. Note content is immutable for other clients — only curation fields are reachable here.',
+      inputSchema: {
+        id: z.string(),
+        tags: z.array(z.string()).max(50).optional(),
+        collection: z.string().max(200).nullable().optional(),
+        archived: z.boolean().optional(),
+        related_item_ids: z.array(z.string()).max(50).optional(),
+        expected_revision: z.number().int().min(1),
+        idempotency_key: z.string().min(1).max(200),
+      },
+    },
+    guarded((args: any) => {
+      if (!canWrite) throw new PolicyDeniedError('this API key lacks the "write" scope');
+      const { id, idempotency_key, ...curate } = args;
+      const { item } = commands.curateNote(client, id, curate, idempotency_key);
+      return { item_id: item.id, revision: item.revision, status: item.status, tags: item.tags };
+    }),
+  );
+
+  server.registerTool(
+    'update_operational_state',
+    {
+      title: 'Update an operational state slot',
+      description:
+        'Write a machine-updated state slot (e.g. a budget gauge). Requires an EXACT state_key rule in the namespace policy naming you as a writer, the matching schema_id, and a schema-valid value. These slots live outside search — read them back with get_operational_state.',
+      inputSchema: {
+        state_key: z.string().min(1).max(200),
+        schema_id: z.string().min(1).max(100),
+        title: z.string().max(500).optional().describe('Display title (first write only)'),
+        value: z.unknown().optional(),
+        observed_at: z.string().nullable().optional(),
+        expires_at: z.string().nullable().optional(),
+        status: z.enum(STATUSES).optional(),
+        expected_revision: z.number().int().min(1).optional().describe('Required when the slot already exists'),
+        idempotency_key: z.string().min(1).max(200),
+      },
+    },
+    guarded((args: any) => {
+      if (!canWrite) throw new PolicyDeniedError('this API key lacks the "write" scope');
+      const { idempotency_key, ...input } = args;
+      const { item, created } = commands.updateOperationalState(client, input, idempotency_key);
+      return { item_id: item.id, state_key: item.state_key, revision: item.revision, created };
+    }),
+  );
+
+  server.registerTool(
+    'get_operational_state',
+    {
+      title: 'Read an operational state slot',
+      description:
+        'Read a machine-updated state slot by exact key. Requires a state rule naming you as a reader.',
+      inputSchema: {
+        state_key: z.string().min(1).max(200),
+      },
+    },
+    guarded((args: any) => {
+      if (!canRead) throw new PolicyDeniedError('this API key lacks the "read" scope');
+      const item = commands.readOperationalState(client, args.state_key);
+      if (!item) throw new NotFoundError(`no state slot "${args.state_key}"`);
+      return { item };
+    }),
   );
 
   return server;

@@ -1,35 +1,52 @@
 # ContextHub
 
-自架的個人 Context Hub：**各 app 透過 REST API 寫入 context，AI agents 透過 MCP 讀取跨 app context**，並內建信任模型——每筆資料帶有「誰說的」（authority）與「審核狀態」（acceptance），agent 的推論經人審核才成為可用知識，來源 ACL 無法被洗白。
+部署在私人 NAS 的**跨 AI 記憶權威平台**(system of record):Codex、Claude Code、個人/工作 Hermes 的唯一記憶來源。**Apps 透過 REST 寫入投影,AI agents 透過 MCP 讀寫記憶**;個人與工作記憶以 namespace 嚴格隔離,agent 寫入經信任升格(candidate→accepted)才成為共享事實,所有讀寫留稽核、所有版本與衝突裁決可追溯。
 
-完整設計見 [docs/DESIGN.md](docs/DESIGN.md)。
+完整設計見 [docs/DESIGN.md](docs/DESIGN.md);信任邊界與資料治理見 [docs/ADR-001](docs/ADR-001-trust-boundary.md)。
 
 ```
-Apps（財務/人際/工作…） ──REST──▶  ContextHub（NAS, Docker）  ◀──MCP── AI agents（hermes…）
-                                   SQLite + FTS5（中文全文搜尋）
-                                   authority / acceptance / read_sources ACL
+Apps/agents ──REST──▶  ContextHub(NAS, Docker)  ◀──MCP── Codex / Claude Code / Hermes
+                       SQLite(唯一權威)+ FTS5(中文全文搜尋,可重建)
+                       namespace 隔離 ‧ 政策 allowlist ‧ 稽核 fail-closed
+                       authority × trust_state × lifecycle ‧ 版本/裁決 append-only
 ```
 
 ## 本機開發
 
 ```bash
 npm install
-npm test          # tsc typecheck + vitest（core / REST / MCP / 信任模型邊界）
+npm test          # tsc typecheck + vitest(隔離/信任/政策/稽核/一致性/還原邊界)
 npm run dev       # http://localhost:8787
-npm run e2e       # 真實 HTTP 端對端（build → seed → REST → MCP → 收工）
+npm run e2e       # 真實 HTTP 端對端:REST↔MCP 一致性 → 備份 → 還原 → reindex → 驗證
 ```
 
-發 API key（CLI 直接操作 DB，不需 ADMIN_TOKEN）：
+## 開通 clients(一 key 一 namespace)
 
 ```bash
-npm run cli -- create-client --id finance-app --name "財經管理App" --kind app --scopes read,write
-npm run cli -- create-client --id hermes --name "Hermes 秘書" --kind agent --scopes read,write --max-sensitivity private
-npm run cli -- create-client --id ball-agent --name "棒球社群" --kind agent --scopes read --read-sources crm-app
-npm run cli -- seed-demo     # 塞入財務/人際/工作三個來源的示範資料
-npm run cli -- list-clients
+# AI 工具(agent):寫入一律 candidate,經你審核才成為共享事實
+npm run cli -- create-client --id claude-code-personal --name "Claude Code(個人)" \
+  --namespace personal --principal-kind agent --profile agent-default
+npm run cli -- create-client --id hermes-personal --name "Hermes 秘書" \
+  --namespace personal --principal-kind agent --profile agent-default --max-sensitivity private
+npm run cli -- create-client --id codex-personal --name "Codex" \
+  --namespace personal --principal-kind agent --profile agent-default
+
+# 來源 app(service):自己投影的可信 producer(policy-accepted)
+npm run cli -- create-client --id finance-app --name "財經管理App" \
+  --namespace personal --principal-kind service --profile app-producer
+
+# 你自己的審核憑證(human):日常審核不要用 ADMIN_TOKEN
+npm run cli -- create-client --id tim-reviewer --name "Tim(審核)" \
+  --namespace personal --principal-kind human --profile reviewer
+
+# 工作 namespace:deny-by-default,建了 client 還要在政策裡明確 allowlist
+npm run cli -- create-client --id hermes-work --name "Hermes(工作)" \
+  --namespace work --principal-kind agent --profile none
+npm run cli -- policy-show --namespace work > /tmp/work-policy.json   # 編輯 rules 後:
+npm run cli -- policy-apply --namespace work --file /tmp/work-policy.json
 ```
 
-Client 政策（server 端裁決，agent 傳參數沒用）：`--max-sensitivity`（private 資料天花板，app 預設 private、agent 預設 normal）、`--read-sources`（來源白名單，預設 all）。
+要點:namespace 與 principal-kind **必填**(fail-closed);同一工具要碰個人+工作就發兩把 key、設兩個 MCP 連線;`--profile` 是顯式的政策升版(被稽核),`none` 表示零權限待手動授權;key 外洩用 `rotate-key --id <client>`(身分與稽核連續性保留)。work namespace 只放抽取後摘要/task,禁原文——見 ADR-001。
 
 ## NAS 部署
 
@@ -37,73 +54,71 @@ Client 政策（server 端裁決，agent 傳參數沒用）：`--max-sensitivity
 git clone <this repo> && cd ContextHub
 echo "ADMIN_TOKEN=$(openssl rand -base64 32)" > .env
 docker compose up -d --build
-curl http://localhost:8787/health   # {"status":"ok"}
-
-docker compose exec contexthub node dist/cli.js create-client \
-  --id hermes --name "Hermes 秘書" --kind agent --scopes read,write
+curl http://localhost:8787/health   # {"status":"ok","audit_writable":true,...}
 ```
 
-**備份**：WAL 模式下直接複製 `.db` 不是一致備份。用內建快照指令，NAS 排程每日跑、Hyper Backup 指向快照目錄：
+**備份**(每日 NAS 排程;WAL 下直接複製 `.db` 不是一致備份):
 
 ```bash
-docker compose exec contexthub node dist/cli.js backup   # → /data/backups/contexthub-<ts>.db
+docker compose exec contexthub node dist/cli.js backup        # VACUUM INTO → /data/backups/
+docker compose exec contexthub node dist/cli.js idempotency-gc # 90 天 TTL 清理(每週)
 ```
 
-外出存取建議 Tailscale（不開公網 port）。
-
-## App 端：寫入 context（REST）
+Hyper Backup 指向 `backups/` 並開啟 client-side 加密。**還原**(也是每月 drill 的腳本):
 
 ```bash
-curl -X POST http://<nas>:8787/v1/items \
-  -H "Authorization: Bearer chk_xxx" -H "Content-Type: application/json" \
-  -d '{
-    "type": "state",
-    "title": "本月餐飲預算已用 82%",
-    "content": "剩 NT$2,160，距月底 9 天",
-    "data": {"budget": 12000, "spent": 9840},
-    "source_item_id": "monthly-food-budget",
-    "source_uri": "myfinance://budget/2026-07"
-  }'
+./scripts/restore.sh data/backups/contexthub-<ts>.db
+# stop → 移開舊 db 與 -wal/-shm → 放快照 → start → 必跑 reindex → health 驗證
 ```
 
-寫入原則：**放 AI 決策有用的投影，不是全量原始資料**（歷史留在你的 app；`source_item_id` 讓同一個業務物件就地更新、`transaction` 只 dedup 不覆寫、更正回 409）。查詢：`GET /v1/items?q=財務&type=task`。完整 API 與 per-type 政策見 [docs/DESIGN.md §7](docs/DESIGN.md)。
+外出存取走 Tailscale,不開公網 port。
 
-## Agent 端：接上 MCP
+## Agent 端:接上 MCP
 
 ```bash
-claude mcp add --transport http contexthub http://<nas>:8787/mcp \
-  --header "Authorization: Bearer chk_<agent的key>"
+claude mcp add --transport http contexthub-personal http://<nas>:8787/mcp \
+  --header "Authorization: Bearer chk_<personal的key>"
+claude mcp add --transport http contexthub-work http://<nas>:8787/mcp \
+  --header "Authorization: Bearer chk_<work的key>"     # 連線即 namespace 邊界
 ```
 
-7 個工具：
+16 個工具。讀取面:`search_context`(中文 OK、多查詢合併、結果帶 authority/trust_state)、`get_current_context`、`get_recent_context`、`get_context_item`、`get_context_brief`、`list_context_sources`、`get_memory_history`(版本+裁決史)、`my_candidates`(自己的待審)。
 
-| Tool | 用途 |
-|---|---|
-| `get_context_brief` | 規劃前先呼叫：一次拿跨來源近況摘要 |
-| `get_current_context` | 「現在成立的事」：active 任務、未來事件、有效狀態、**已審核**的洞察 |
-| `search_context` | 全文搜尋（中文 OK、多查詢一次合併、結果帶 authority/acceptance 標籤） |
-| `get_recent_context` | 最近 N 天時間軸 |
-| `get_context_item` | 單筆全文＋evidence＋審核紀錄 |
-| `propose_insight` | agent 提案推論（附 confidence 與 evidence；**審核前對所有讀取隱形**） |
-| `list_context_sources` | 看有哪些來源（只列你有權讀的） |
+記憶生命週期:`save_memory`(存偏好/事實/專案脈絡;政策決定 candidate/accepted)、`propose_insight`(推論+evidence)、`revise_my_candidate`、`propose_successor`(取代過時的 accepted 記憶,裁決原子寫回)、`operate_task`(型別化任務操作,碰不到語意欄位)、`curate_note`、`update_operational_state`/`get_operational_state`(exact-key 狀態槽)。
 
-## 審核 agent 的提案
+所有 mutation 必帶 `idempotency_key`(UUID)——timeout 重試安全,同 key 回原結果。
+
+## 審核 agent 的記憶提案
 
 ```bash
-npm run cli -- review-insight --id 01K... --action accept --revision 1 --note "確認屬實"
-npm run cli -- review-insight --id 01K... --action reject --revision 1 --note "單次行為，非長期偏好"
+npm run cli -- candidates                          # 待審 inbox
+npm run cli -- review --id 01K... --action accept --revision 1 --note "確認屬實"
+npm run cli -- review --id 01K... --action reject --revision 1 --note "單次行為"
+npm run cli -- review --id 01K... --action revoke --revision 3 --note "已不成立"
+npm run cli -- audit --namespace work --limit 50   # 稽核軌(讀/寫/拒絕/管理)
 ```
 
-或給你的審核 UI app 一把含 `review_insight` scope 的 key 走 `PATCH /v1/items/:id`。被拒的提案 agent 可用 id 讀到 `review_note`，知道為什麼。
+或用 reviewer key 走 `POST /v1/items/:id/review`。被拒的提案 agent 可用 id 讀到 `review_note`;接受 successor 會原子地把舊記憶標為 superseded(裁決寫回 hub)。
+
+## ADMIN_TOKEN 管理
+
+- token **只存在 NAS 上的 `.env`**(`.gitignore` 已排除),絕不寫進 repo、文件或訊息。
+- 產生/輪替:NAS 上 `sed -i "s/^ADMIN_TOKEN=.*/ADMIN_TOKEN=$(openssl rand -base64 32)/" .env && docker compose up -d`,舊 token 立即失效。
+- 曾出現在任何檔案、剪貼簿或對話中即視同外洩,立即輪替。日常審核用 human reviewer key,不用 admin token。
 
 ## 專案結構
 
 ```
 src/
-  core/    # 所有 SQL、ACL（ReadAccess）與信任規則（items-repo, clients-repo, canonical, cjk, errors）
-  http/    # Fastify：auth + /v1 routes（審核權限矩陣在 items route）
-  mcp/     # MCP server（7 tools）+ Streamable HTTP 掛載
-  db/      # SQLite 連線 + 內嵌 migrations
-  cli.ts   # create-client / review-insight / seed-demo / backup
-test/      # 57+ tests：core 單元、REST/MCP 整合、信任模型安全邊界
+  core/    # 單點強制層:commands(mutation+稽核+idempotency)、items-repo(applyFilters:
+           #   namespace+trust+ACL)、policy/policies-repo(PolicyV1 版本化)、audit-repo、
+           #   clients-repo(immutable identity)、canonical、cjk、errors
+  http/    # Fastify:auth + /v1 routes(items/candidates/review/task-op/curate/state/
+           #   history/audit/policies/clients/namespaces)+ health(degraded 回報)
+  mcp/     # MCP server(16 tools)+ Streamable HTTP 掛載(stateless,一 key 一 namespace)
+  db/      # SQLite 連線(synchronous=FULL、instance lock)+ 內嵌 migrations(v1–v5)
+  cli.ts   # create-client/rotate-key/policy-*/review/candidates/audit/reindex/backup/purge/...
+scripts/   # e2e.sh(REST↔MCP 一致性+備份還原全流程)、restore.sh(NAS runbook)
+test/      # 100+ tests:隔離/信任/政策/稽核 fail-closed/idempotency/一致性/還原邊界
+docs/      # DESIGN.md(v4)、ADR-001(信任邊界與治理)
 ```

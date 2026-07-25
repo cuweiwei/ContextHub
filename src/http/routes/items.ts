@@ -1,26 +1,23 @@
-import type { FastifyInstance, FastifyReply } from 'fastify';
+import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { AppDeps } from '../server.js';
 import { requireScope } from '../auth.js';
-import { RevisionConflictError, SourceItemConflictError, ValidationError } from '../../core/errors.js';
+import { idempotencyKeyFrom, sendError } from '../errors.js';
 import {
-  accessFor,
-  AGENT_WRITABLE_TYPES,
   AUTHORITIES,
   isoDateTime,
   newItemSchema,
   patchItemSchema,
-  resolveAuthority,
   STATUSES,
-  type ClientAuth,
 } from '../../core/types.js';
 
 const createBodySchema = newItemSchema.extend({
-  // Admin-only: write on behalf of another source (seeding/import)…
+  // Admin-only: write on behalf of another source (seeding/import), specify
+  // authority (the human-entry path for authority=user), or target a
+  // namespace explicitly. IGNORED → rejected for every other client.
   source: z.string().optional(),
-  // …and specify authority (the human-entry path for authority=user).
-  // For every other client this field is IGNORED — authority comes from identity.
   authority: z.enum(AUTHORITIES).optional(),
+  namespace: z.string().optional(),
 });
 
 const batchBodySchema = z.object({
@@ -36,11 +33,60 @@ const listQuerySchema = z.object({
   since: isoDateTime.optional(),
   until: isoDateTime.optional(),
   sensitivity: z.enum(['normal', 'private', 'all']).default('all'),
-  include_proposed: z.coerce.boolean().default(false),
+  include_candidates: z.coerce.boolean().default(false),
   sort: z.enum(['created', 'occurred']).default('created'),
   limit: z.coerce.number().int().min(1).max(100).default(20),
   offset: z.coerce.number().int().min(0).max(10_000).default(0),
   cursor: z.string().optional(),
+});
+
+const reviewBodySchema = z.object({
+  decision: z.enum(['accept', 'reject']),
+  expected_revision: z.number().int().min(1),
+  note: z.string().max(2000).optional(),
+  idempotency_key: z.string().min(1).max(200),
+});
+
+const revokeBodySchema = z.object({
+  expected_revision: z.number().int().min(1),
+  note: z.string().max(2000).optional(),
+  idempotency_key: z.string().min(1).max(200),
+});
+
+const taskOpBodySchema = z.object({
+  kind: z.enum([
+    'set_status',
+    'set_progress',
+    'set_blocked',
+    'complete_checklist_item',
+    'set_due_date',
+    'set_priority',
+    'set_assignee',
+    'set_dependencies',
+  ]),
+  status: z.enum(STATUSES).optional(),
+  progress: z.number().min(0).max(100).optional(),
+  blocked_reason: z.string().max(2000).nullable().optional(),
+  checklist_index: z.number().int().min(0).optional(),
+  due_date: isoDateTime.nullable().optional(),
+  priority: z.enum(['low', 'medium', 'high']).nullable().optional(),
+  assignee: z.string().max(200).nullable().optional(),
+  dependencies: z.array(z.string().min(1)).max(50).optional(),
+  expected_revision: z.number().int().min(1),
+  idempotency_key: z.string().min(1).max(200),
+});
+
+const curateBodySchema = z.object({
+  tags: z.array(z.string().min(1).max(100)).max(50).optional(),
+  collection: z.string().max(200).nullable().optional(),
+  archived: z.boolean().optional(),
+  related_item_ids: z.array(z.string().min(1)).max(50).optional(),
+  expected_revision: z.number().int().min(1),
+  idempotency_key: z.string().min(1).max(200),
+});
+
+const reviseBodySchema = patchItemSchema.extend({
+  idempotency_key: z.string().min(1).max(200),
 });
 
 function csv(value: string | undefined): string[] | undefined {
@@ -49,49 +95,22 @@ function csv(value: string | undefined): string[] | undefined {
   return parts.length ? parts : undefined;
 }
 
-function sendError(reply: FastifyReply, err: unknown): FastifyReply {
-  if (err instanceof SourceItemConflictError || err instanceof RevisionConflictError) {
-    return reply.code(409).send({ error: { code: err.code, message: err.message } });
-  }
-  if (err instanceof ValidationError) {
-    return reply.code(400).send({ error: { code: err.code, message: err.message } });
-  }
-  throw err;
-}
-
-/** Insight isolation: agents may only create insight/task/note items. */
-function agentTypeViolation(client: ClientAuth, type: string): string | null {
-  if (client.kind === 'agent' && !AGENT_WRITABLE_TYPES.has(type)) {
-    return `agent clients may only write types ${[...AGENT_WRITABLE_TYPES].join('/')} — facts and states belong to source apps or the user`;
-  }
-  return null;
-}
-
 export function registerItemRoutes(app: FastifyInstance, deps: AppDeps): void {
-  const { itemsRepo } = deps;
+  const { commands } = deps;
 
   app.post('/v1/items', { preHandler: requireScope('write') }, async (req, reply) => {
     const parsed = createBodySchema.safeParse(req.body);
     if (!parsed.success) {
       return reply.code(400).send({ error: { code: 'invalid_request', message: parsed.error.message } });
     }
-    const { source: requestedSource, authority: requestedAuthority, ...input } = parsed.data;
-    const client = req.client!;
-    if (requestedSource && requestedSource !== client.id && !client.isAdmin) {
-      return reply.code(403).send({
-        error: { code: 'forbidden', message: 'Only the admin token may write on behalf of another source' },
-      });
-    }
-    const violation = agentTypeViolation(client, input.type);
-    if (violation) return reply.code(403).send({ error: { code: 'forbidden', message: violation } });
+    const { source, authority, namespace, ...input } = parsed.data;
     try {
-      const { item, created } = itemsRepo.insert(
-        requestedSource ?? client.id,
-        input,
-        resolveAuthority(client, requestedAuthority),
-        accessFor(client),
-      );
-      return reply.code(created ? 201 : 200).send({ item, created });
+      const { item, created, replayed } = commands.createMemory(req.client!, input, {
+        source,
+        authority,
+        namespace,
+      });
+      return reply.code(created && !replayed ? 201 : 200).send({ item, created, replayed });
     } catch (err) {
       return sendError(reply, err);
     }
@@ -102,26 +121,28 @@ export function registerItemRoutes(app: FastifyInstance, deps: AppDeps): void {
     if (!parsed.success) {
       return reply.code(400).send({ error: { code: 'invalid_request', message: parsed.error.message } });
     }
-    const client = req.client!;
+    const batchKey = idempotencyKeyFrom(req.headers as Record<string, unknown>);
+    if (!batchKey) {
+      return reply.code(400).send({
+        error: { code: 'invalid_request', message: 'batch writes require an Idempotency-Key header' },
+      });
+    }
+    const first = parsed.data.items[0]!;
     for (const entry of parsed.data.items) {
-      if (entry.source && entry.source !== client.id && !client.isAdmin) {
-        return reply.code(403).send({
-          error: { code: 'forbidden', message: 'Only the admin token may write on behalf of another source' },
+      if ((entry.source ?? first.source) !== first.source || (entry.namespace ?? first.namespace) !== first.namespace) {
+        return reply.code(400).send({
+          error: { code: 'invalid_request', message: 'a batch must target a single source/namespace' },
         });
       }
-      const violation = agentTypeViolation(client, entry.type);
-      if (violation) return reply.code(403).send({ error: { code: 'forbidden', message: violation } });
     }
     try {
-      const results = parsed.data.items.map(({ source, authority, ...input }) =>
-        itemsRepo.insert(
-          source ?? client.id,
-          input,
-          resolveAuthority(client, authority),
-          accessFor(client),
-        ),
+      const { results, replayed } = commands.createMemoryBatch(
+        req.client!,
+        batchKey,
+        parsed.data.items.map(({ source: _s, authority: _a, namespace: _n, ...input }) => input),
+        { source: first.source, authority: first.authority, namespace: first.namespace },
       );
-      return reply.code(201).send({ results });
+      return reply.code(replayed ? 200 : 201).send({ results, replayed });
     } catch (err) {
       return sendError(reply, err);
     }
@@ -133,7 +154,6 @@ export function registerItemRoutes(app: FastifyInstance, deps: AppDeps): void {
       return reply.code(400).send({ error: { code: 'invalid_request', message: parsed.error.message } });
     }
     const qp = parsed.data;
-    const client = req.client!;
     const statuses = csv(qp.status)?.filter((s): s is (typeof STATUSES)[number] =>
       (STATUSES as readonly string[]).includes(s),
     );
@@ -145,35 +165,74 @@ export function registerItemRoutes(app: FastifyInstance, deps: AppDeps): void {
       since: qp.since,
       until: qp.until,
       sensitivity: qp.sensitivity, // repo clamps to the client ceiling
-      includeProposed: qp.include_proposed,
     };
-    const access = accessFor(client);
-    if (qp.q?.trim()) {
-      const { fullItems, totalMatched } = itemsRepo.search(access, {
-        queries: [qp.q],
+    try {
+      if (qp.q?.trim()) {
+        const { fullItems, totalMatched, note } = commands.search(req.client!, {
+          queries: [qp.q],
+          filters,
+          limit: qp.limit,
+          offset: qp.offset,
+          includeCandidates: qp.include_candidates,
+        });
+        return reply.send({ items: fullItems, total_matched: totalMatched, offset: qp.offset, note });
+      }
+      const { items, nextCursor, note } = commands.listItems(req.client!, {
         filters,
         limit: qp.limit,
-        offset: qp.offset,
+        cursor: qp.cursor,
+        sort: qp.sort,
+        includeCandidates: qp.include_candidates,
       });
-      return reply.send({ items: fullItems, total_matched: totalMatched, offset: qp.offset });
+      return reply.send({ items, next_cursor: nextCursor ?? null, note });
+    } catch (err) {
+      return sendError(reply, err);
     }
-    const { items, nextCursor } = itemsRepo.list(access, {
-      filters,
-      limit: qp.limit,
-      cursor: qp.cursor,
-      sort: qp.sort,
-    });
-    return reply.send({ items, next_cursor: nextCursor ?? null });
+  });
+
+  app.get('/v1/candidates', { preHandler: requireScope('read') }, async (req, reply) => {
+    const qp = z
+      .object({
+        scope: z.enum(['my', 'inbox']).default('my'),
+        limit: z.coerce.number().int().min(1).max(100).default(20),
+      })
+      .safeParse(req.query);
+    if (!qp.success) {
+      return reply.code(400).send({ error: { code: 'invalid_request', message: qp.error.message } });
+    }
+    try {
+      const items = commands.listCandidates(req.client!, qp.data.scope, qp.data.limit);
+      return reply.send({ scope: qp.data.scope, items });
+    } catch (err) {
+      return sendError(reply, err);
+    }
   });
 
   app.get('/v1/items/:id', { preHandler: requireScope('read') }, async (req, reply) => {
     const { id } = req.params as { id: string };
-    const item = itemsRepo.get(accessFor(req.client!), id);
-    if (!item) {
-      // Unauthorized and nonexistent are indistinguishable — no existence leak.
-      return reply.code(404).send({ error: { code: 'not_found', message: `No item with id "${id}"` } });
+    try {
+      const item = commands.getItem(req.client!, id);
+      if (!item) {
+        // Unauthorized, cross-namespace, and nonexistent are indistinguishable.
+        return reply.code(404).send({ error: { code: 'not_found', message: `No item with id "${id}"` } });
+      }
+      return reply.send({ item });
+    } catch (err) {
+      return sendError(reply, err);
     }
-    return reply.send({ item });
+  });
+
+  app.get('/v1/items/:id/history', { preHandler: requireScope('read') }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    try {
+      const history = commands.getHistory(req.client!, id);
+      if (!history) {
+        return reply.code(404).send({ error: { code: 'not_found', message: `No item with id "${id}"` } });
+      }
+      return reply.send(history);
+    } catch (err) {
+      return sendError(reply, err);
+    }
   });
 
   app.patch('/v1/items/:id', { preHandler: requireScope('write') }, async (req, reply) => {
@@ -182,97 +241,134 @@ export function registerItemRoutes(app: FastifyInstance, deps: AppDeps): void {
     if (!parsed.success) {
       return reply.code(400).send({ error: { code: 'invalid_request', message: parsed.error.message } });
     }
-    const patch = parsed.data;
-    const client = req.client!;
-    const existing = itemsRepo.get(accessFor(client), id);
-    if (!existing) {
-      return reply.code(404).send({ error: { code: 'not_found', message: `No item with id "${id}"` } });
+    const key = idempotencyKeyFrom(req.headers as Record<string, unknown>, req.body);
+    if (!key) {
+      return reply.code(400).send({
+        error: { code: 'invalid_request', message: 'mutations require an Idempotency-Key header' },
+      });
     }
+    try {
+      const { item } = commands.patchProjection(req.client!, id, parsed.data, key);
+      return reply.send({ item });
+    } catch (err) {
+      return sendError(reply, err);
+    }
+  });
 
-    // ---- Review operation: acceptance change is standalone and capability-gated.
-    if (patch.acceptance !== undefined) {
-      const extraKeys = Object.keys(patch).filter(
-        (k) => !['acceptance', 'expected_revision', 'review_note'].includes(k),
+  app.post('/v1/items/:id/revise', { preHandler: requireScope('write') }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const parsed = reviseBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: { code: 'invalid_request', message: parsed.error.message } });
+    }
+    const { idempotency_key, ...patch } = parsed.data;
+    try {
+      const { item } = commands.reviseCandidate(req.client!, id, patch, idempotency_key);
+      return reply.send({ item });
+    } catch (err) {
+      return sendError(reply, err);
+    }
+  });
+
+  app.post('/v1/items/:id/successor', { preHandler: requireScope('write') }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const parsed = newItemSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: { code: 'invalid_request', message: parsed.error.message } });
+    }
+    try {
+      const { item, created } = commands.proposeSuccessor(req.client!, id, parsed.data);
+      return reply.code(created ? 201 : 200).send({ item, created });
+    } catch (err) {
+      return sendError(reply, err);
+    }
+  });
+
+  app.post('/v1/items/:id/review', { preHandler: requireScope('write') }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const parsed = reviewBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: { code: 'invalid_request', message: parsed.error.message } });
+    }
+    try {
+      const { item } = commands.reviewMemory(
+        req.client!,
+        id,
+        {
+          decision: parsed.data.decision,
+          expectedRevision: parsed.data.expected_revision,
+          note: parsed.data.note,
+        },
+        parsed.data.idempotency_key,
       );
-      if (extraKeys.length > 0) {
-        return reply.code(400).send({
-          error: {
-            code: 'invalid_request',
-            message: 'an acceptance change must be a standalone operation (only expected_revision and review_note may accompany it)',
-          },
-        });
-      }
-      if (patch.expected_revision === undefined) {
-        return reply.code(400).send({
-          error: { code: 'invalid_request', message: 'expected_revision is required when changing acceptance' },
-        });
-      }
-      if (!client.isAdmin && !client.scopes.includes('review_insight')) {
-        return reply.code(403).send({
-          error: { code: 'forbidden', message: 'reviewing insights requires the "review_insight" scope' },
-        });
-      }
-      if (!client.isAdmin && existing.source === client.id) {
-        return reply.code(403).send({
-          error: { code: 'forbidden', message: 'a client cannot review its own insight proposals' },
-        });
-      }
-      try {
-        const item = itemsRepo.review(id, {
-          acceptance: patch.acceptance,
-          reviewedBy: client.id,
-          expectedRevision: patch.expected_revision,
-          note: patch.review_note,
-        });
-        return reply.send({ item });
-      } catch (err) {
-        return sendError(reply, err);
-      }
+      return reply.send({ item });
+    } catch (err) {
+      return sendError(reply, err);
     }
+  });
 
-    // ---- Content updates.
-    if (existing.type === 'insight' && !client.isAdmin) {
-      // Insights are append-only: reviewers may change status (e.g. supersede
-      // an outdated accepted insight); nobody but admin edits the content.
-      const keys = Object.keys(patch);
-      const statusOnly = keys.every((k) => ['status', 'expected_revision'].includes(k));
-      if (!statusOnly || !client.scopes.includes('review_insight')) {
-        return reply.code(403).send({
-          error: {
-            code: 'forbidden',
-            message: 'insights are append-only: propose a new insight instead of editing (only reviewers may change status)',
-          },
-        });
-      }
-    } else {
-      if (existing.source !== client.id && !client.isAdmin) {
-        return reply.code(403).send({
-          error: { code: 'forbidden', message: 'Items can only be modified by the client that created them' },
-        });
-      }
-      if (patch.type && client.kind === 'agent' && !AGENT_WRITABLE_TYPES.has(patch.type)) {
-        return reply.code(403).send({
-          error: { code: 'forbidden', message: `agent clients may only use types ${[...AGENT_WRITABLE_TYPES].join('/')}` },
-        });
-      }
+  app.post('/v1/items/:id/revoke', { preHandler: requireScope('write') }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const parsed = revokeBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: { code: 'invalid_request', message: parsed.error.message } });
     }
-    const item = itemsRepo.update(id, patch);
-    return reply.send({ item });
+    try {
+      const { item } = commands.reviewMemory(
+        req.client!,
+        id,
+        { decision: 'revoke', expectedRevision: parsed.data.expected_revision, note: parsed.data.note },
+        parsed.data.idempotency_key,
+      );
+      return reply.send({ item });
+    } catch (err) {
+      return sendError(reply, err);
+    }
+  });
+
+  app.post('/v1/items/:id/task-op', { preHandler: requireScope('write') }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const parsed = taskOpBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: { code: 'invalid_request', message: parsed.error.message } });
+    }
+    const { idempotency_key, ...action } = parsed.data;
+    try {
+      const { item } = commands.operateTask(req.client!, id, action, idempotency_key);
+      return reply.send({ item });
+    } catch (err) {
+      return sendError(reply, err);
+    }
+  });
+
+  app.post('/v1/items/:id/curate', { preHandler: requireScope('write') }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const parsed = curateBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: { code: 'invalid_request', message: parsed.error.message } });
+    }
+    const { idempotency_key, ...curate } = parsed.data;
+    try {
+      const { item } = commands.curateNote(req.client!, id, curate, idempotency_key);
+      return reply.send({ item });
+    } catch (err) {
+      return sendError(reply, err);
+    }
   });
 
   app.delete('/v1/items/:id', { preHandler: requireScope('write') }, async (req, reply) => {
     const { id } = req.params as { id: string };
-    const client = req.client!;
-    const existing = itemsRepo.get(accessFor(client), id);
-    if (!existing) {
-      return reply.code(404).send({ error: { code: 'not_found', message: `No item with id "${id}"` } });
-    }
-    if (existing.source !== client.id && !client.isAdmin) {
-      return reply.code(403).send({
-        error: { code: 'forbidden', message: 'Items can only be deleted by the client that created them' },
+    const key = idempotencyKeyFrom(req.headers as Record<string, unknown>, req.body);
+    if (!key) {
+      return reply.code(400).send({
+        error: { code: 'invalid_request', message: 'mutations require an Idempotency-Key header' },
       });
     }
-    itemsRepo.softDelete(id);
-    return reply.code(204).send();
+    try {
+      commands.softDeleteItem(req.client!, id, key);
+      return reply.code(204).send();
+    } catch (err) {
+      return sendError(reply, err);
+    }
   });
 }
