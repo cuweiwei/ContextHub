@@ -5,7 +5,9 @@ services:
     container_name: contexthub
     restart: unless-stopped
     ports:
-      - "8788:8787"
+      # Fail-safe default: publish only on NAS loopback. For remote Codex
+      # access, set this to the NAS Tailscale IPv4 — never its public IPv4.
+      - "${CONTEXTHUB_BIND_ADDRESS:-127.0.0.1}:${CONTEXTHUB_HOST_PORT:-8788}:8787"
     environment:
       # Generate with: openssl rand -base64 32  (put it in a .env file next to
       # this compose file, or export it in the shell running docker compose)

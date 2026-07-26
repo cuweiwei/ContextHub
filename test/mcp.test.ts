@@ -78,6 +78,8 @@ describe('MCP endpoint', () => {
 
   it('exposes the read surfaces and the memory lifecycle tools', async () => {
     const client = await connect(agentKey);
+    expect(client.getInstructions()).toContain('authoritative long-term memory for namespace "personal"');
+    expect(client.getInstructions()).toContain('Treat only accepted items as shared facts');
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([
       'curate_note',
@@ -97,6 +99,9 @@ describe('MCP endpoint', () => {
       'search_context',
       'update_operational_state',
     ]);
+
+    const sources = await client.callTool({ name: 'list_context_sources', arguments: {} });
+    expect(sources.structuredContent).toEqual(payload(sources));
     await client.close();
   });
 

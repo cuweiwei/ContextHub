@@ -47,6 +47,18 @@ describe('REST API', () => {
     expect(res.json().audit_writable).toBe(true);
   });
 
+  it('serves a no-store reviewer UI without embedding credentials', async () => {
+    const res = await app.inject({ method: 'GET', url: '/review' });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['content-type']).toContain('text/html');
+    expect(res.headers['cache-control']).toBe('no-store');
+    expect(res.headers['content-security-policy']).toContain("default-src 'none'");
+    expect(res.body).toContain('ContextHub · Human review');
+    expect(res.body).toContain('/v1/candidates?scope=inbox');
+    expect(res.body).not.toContain('ADMIN_TOKEN=');
+    expect(res.body).not.toMatch(/chk_[A-Za-z0-9_-]{20,}/);
+  });
+
   it('rejects unauthenticated and unknown-key requests', async () => {
     expect((await app.inject({ method: 'GET', url: '/v1/items' })).statusCode).toBe(401);
     expect(

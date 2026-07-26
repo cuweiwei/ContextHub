@@ -14,6 +14,7 @@ Apps/agents ──REST──▶  ContextHub(NAS, Docker)  ◀──MCP── Cod
 ## 本機開發
 
 ```bash
+nvm use
 npm install
 npm test          # tsc typecheck + vitest(隔離/信任/政策/稽核/一致性/還原邊界)
 npm run dev       # http://localhost:8787
@@ -52,9 +53,11 @@ npm run cli -- policy-apply --namespace work --file /tmp/work-policy.json
 
 ```bash
 git clone <this repo> && cd ContextHub
-echo "ADMIN_TOKEN=$(openssl rand -base64 32)" > .env
+cp .env.example .env
+# ADMIN_TOKEN 設為新隨機值；CONTEXTHUB_BIND_ADDRESS 設 NAS 的 Tailscale IPv4。
+# 絕對不要填 NAS 的固定公網 IPv4。
 docker compose up -d --build
-curl http://localhost:8787/health   # {"status":"ok","audit_writable":true,...}
+curl http://<nas-tailscale-ip>:8788/health   # {"status":"ok","audit_writable":true,...}
 ```
 
 **備份**(每日 NAS 排程;WAL 下直接複製 `.db` 不是一致備份):
@@ -71,16 +74,20 @@ Hyper Backup 指向 `backups/` 並開啟 client-side 加密。**還原**(也是�
 # stop → 移開舊 db 與 -wal/-shm → 放快照 → start → 必跑 reindex → health 驗證
 ```
 
-外出存取走 Tailscale,不開公網 port。
+外出存取走 Tailscale,不開公網 port。ISP 固定公網 IP 不是必要條件；ContextHub
+只綁 NAS 的 Tailscale IP，不能綁 `0.0.0.0` 或 NAS 的公網 IP。
 
 ## Agent 端:接上 MCP
 
 ```bash
-claude mcp add --transport http contexthub-personal http://<nas>:8787/mcp \
+claude mcp add --transport http contexthub-personal http://<nas-tailscale-ip>:8788/mcp \
   --header "Authorization: Bearer chk_<personal的key>"
-claude mcp add --transport http contexthub-work http://<nas>:8787/mcp \
+claude mcp add --transport http contexthub-work http://<nas-tailscale-ip>:8788/mcp \
   --header "Authorization: Bearer chk_<work的key>"     # 連線即 namespace 邊界
 ```
+
+Codex 的安全設定、personal/work credential 隔離與 smoke test 見
+[docs/CODEX.md](docs/CODEX.md)。
 
 16 個工具。讀取面:`search_context`(中文 OK、多查詢合併、結果帶 authority/trust_state)、`get_current_context`、`get_recent_context`、`get_context_item`、`get_context_brief`、`list_context_sources`、`get_memory_history`(版本+裁決史)、`my_candidates`(自己的待審)。
 
@@ -98,7 +105,10 @@ npm run cli -- review --id 01K... --action revoke --revision 3 --note "已不成
 npm run cli -- audit --namespace work --limit 50   # 稽核軌(讀/寫/拒絕/管理)
 ```
 
-或用 reviewer key 走 `POST /v1/items/:id/review`。被拒的提案 agent 可用 id 讀到 `review_note`;接受 successor 會原子地把舊記憶標為 superseded(裁決寫回 hub)。
+Human reviewer 可從 Tailscale 私網開啟 `http://<NAS_TAILSCALE_IP>:8788/review`，
+貼上該 namespace 的 reviewer key 進行 inbox、歷史、接受與拒絕操作；key 只留在當前頁面的記憶體，
+不會寫入 localStorage。REST 介面仍是 `POST /v1/items/:id/review`。被拒的提案 agent 可用 id
+讀到 `review_note`;接受 successor 會原子地把舊記憶標為 superseded(裁決寫回 hub)。
 
 ## ADMIN_TOKEN 管理
 

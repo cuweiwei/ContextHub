@@ -188,7 +188,8 @@ docker compose exec contexthub node dist/cli.js create-client \
 - **還原**:`scripts/restore.sh <snapshot>`——stop→移開舊 db 與 **-wal/-shm**→放快照→start→**必跑 `reindex`**(TEXT PK 的 implicit rowid 經 VACUUM 可能重編,FTS rowid 對映不可信)→health+smoke query。
 - **每月 restore drill**(ADR-001):拿最新快照實際還原到隔離目錄驗證。`npm run e2e` 內建整條 備份→還原→reindex→驗證 流程。
 - Retention:versions/audit 永久;idempotency 90 天(`idempotency-gc` 排程);快照依 NAS 輪替。
-- Tailscale 私網,不開公網 port。
+- Tailscale 私網,不開公網 port。Compose 的 host publication 必須綁 NAS 的
+  Tailscale IP(或 local-only 的 loopback),不可綁 `0.0.0.0` 或 NAS 公網 IP。
 
 ## 13. Roadmap(v5+)
 
@@ -198,7 +199,7 @@ docker compose exec contexthub node dist/cli.js create-client \
 | Entity 圖譜 | `entities` 欄位已存結構化字串 |
 | insight-as-evidence | 需 recursive CTE evidence closure + 環檢測 |
 | Tamper-evident audit(hash chain) | audit_log append-only 已就緒 |
-| 審核 UI | REST 面已完整(candidates/review/history) |
+| 審核 UI | `/review` 第一版已提供 candidates/history/accept/reject；後續可加批次審核與登入整合 |
 | 訂閱/推播 | 單一寫入路徑(commands)易掛 hook |
 | 簡繁互轉搜尋 | query 側加轉換層 |
 | 公網 hardening(HTTPS/rate limit) | 目前威脅模型=LAN/Tailscale 私網 |

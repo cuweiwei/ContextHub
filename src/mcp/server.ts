@@ -17,11 +17,22 @@ import { sourcesView } from '../http/routes/sources.js';
 export type McpDeps = Pick<AppDeps, 'commands' | 'clientsRepo'>;
 
 function jsonResult(payload: unknown) {
-  return { content: [{ type: 'text' as const, text: JSON.stringify(payload) }] };
+  const structuredContent =
+    typeof payload === 'object' && payload !== null && !Array.isArray(payload)
+      ? (payload as Record<string, unknown>)
+      : { value: payload };
+  return {
+    content: [{ type: 'text' as const, text: JSON.stringify(payload) }],
+    structuredContent,
+  };
 }
 
 function errorResult(message: string) {
-  return { content: [{ type: 'text' as const, text: JSON.stringify({ error: message }) }], isError: true };
+  return {
+    content: [{ type: 'text' as const, text: JSON.stringify({ error: message }) }],
+    structuredContent: { error: message },
+    isError: true,
+  };
 }
 
 function normalizeIso(value: string | undefined): string | undefined {
@@ -50,7 +61,21 @@ function isDomainError(err: unknown): err is Error {
  */
 export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
   const { commands } = deps;
-  const server = new McpServer({ name: 'contexthub', version: '0.4.0' });
+  const workGovernance =
+    client.namespace === 'work'
+      ? ' In work, save only extracted summaries, tasks, decisions, and work preferences; never store raw email, chat, meeting transcripts, PII, customer data, undisclosed financials, or confidential technical details.'
+      : '';
+  const server = new McpServer(
+    { name: 'contexthub', version: '0.4.0' },
+    {
+      instructions:
+        `ContextHub is the authoritative long-term memory for namespace "${client.namespace}". ` +
+        'Before user-specific planning, call get_context_brief once or use search_context. ' +
+        'Treat only accepted items as shared facts; candidates are unreviewed proposals. ' +
+        'Do not save transient conversation details. Every mutation needs a fresh UUID idempotency_key; ' +
+        `reuse a key only when retrying the same logical operation.${workGovernance}`,
+    },
+  );
 
   const canRead = client.scopes.includes('read');
   const canWrite = client.scopes.includes('write');

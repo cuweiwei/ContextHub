@@ -25,6 +25,12 @@ STAMP=$(date +%Y%m%d-%H%M%S)
 
 [[ -f "$SNAPSHOT" ]] || { echo "snapshot not found: $SNAPSHOT"; exit 1; }
 
+container_health() {
+  docker compose exec -T contexthub node -e \
+    "fetch('http://127.0.0.1:8787/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))" \
+    >/dev/null 2>&1
+}
+
 echo "== stopping contexthub =="
 docker compose stop contexthub
 
@@ -39,7 +45,7 @@ echo "== starting contexthub =="
 docker compose up -d contexthub
 for i in $(seq 1 60); do
   sleep 1
-  if curl -sf http://localhost:8787/health >/dev/null 2>&1; then break; fi
+  if container_health; then break; fi
   [[ $i == 60 ]] && { echo "server did not come up after restore"; exit 1; }
 done
 
@@ -47,7 +53,8 @@ echo "== rebuilding the FTS index (mandatory after restore) =="
 docker compose exec contexthub node dist/cli.js reindex
 
 echo "== verification =="
-curl -sf http://localhost:8787/health
+docker compose exec -T contexthub node -e \
+  "fetch('http://127.0.0.1:8787/health').then(async r=>{console.log(await r.text());if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
 echo ""
 docker compose exec contexthub node dist/cli.js list-clients
 echo ""
