@@ -53,6 +53,12 @@ const REVIEW_HTML = String.raw`<!doctype html>
       color: var(--muted); font-size: 12px; white-space: nowrap;
     }
     .secure::before { content: ""; width: 8px; height: 8px; background: var(--mint); border-radius: 50%; }
+    .top-actions { display: flex; align-items: center; justify-content: flex-end; gap: 9px; flex-wrap: wrap; }
+    .nav-link {
+      display: inline-flex; padding: 10px 13px; border: 1px solid var(--line); border-radius: 999px;
+      color: var(--muted); background: rgba(10, 19, 17, .74); font-size: 12px; text-decoration: none;
+    }
+    .nav-link:hover { color: var(--text); border-color: var(--mint-2); }
     .auth, .empty {
       border: 1px solid var(--line); background: var(--panel); border-radius: 18px; box-shadow: var(--shadow);
     }
@@ -147,7 +153,10 @@ const REVIEW_HTML = String.raw`<!doctype html>
         <h1>記憶審核台</h1>
         <p class="lede">檢視 agent 提案的來源、內容與版本，再決定是否升格為共享記憶。接受 successor 時，舊記憶會由核心層原子標記為 superseded。</p>
       </div>
-      <div class="secure">Reviewer key 只留在目前頁面</div>
+      <div class="top-actions">
+        <a class="nav-link" href="/explore">查看全部 Accepted 記憶</a>
+        <div class="secure">Reviewer key 只留在目前頁面</div>
+      </div>
     </header>
 
     <section class="auth">

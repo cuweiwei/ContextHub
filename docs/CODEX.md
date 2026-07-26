@@ -9,13 +9,29 @@ ContextHub is a remote MCP server used by Codex; Codex project guidance and Cont
 
 Use a Tailscale DNS name or Tailscale IP for the NAS. Do not use the public IP and do not add router port-forwarding rules.
 
-The current Docker mapping is host port `8788` to container port `8787`, so the MCP URL is:
+The container publishes host loopback port `8788` to container port `8787`.
+On Synology, Tailscale normally uses userspace networking, so do not bind
+Docker directly to the NAS `100.x` address. Configure a private TCP forwarder
+on the NAS:
+
+```bash
+sudo /var/packages/Tailscale/target/bin/tailscale serve \
+  --bg --yes --tcp=8788 tcp://127.0.0.1:8788
+```
+
+The MCP URL exposed to tailnet devices is:
 
 ```text
 http://<nas-tailscale-name-or-ip>:8788/mcp
 ```
 
 ContextHub currently serves HTTP. Tailscale supplies the private encrypted network boundary; do not send its bearer tokens over untrusted public HTTP.
+
+For general agent behavior and migrating Codex's existing durable memory into
+ContextHub, follow [AGENT-GUIDE.md](AGENT-GUIDE.md). In particular, inventory
+the old store read-only, deduplicate with `search_context`, write atomic
+candidate memories with `save_memory`, review them, and keep the old store
+read-only until post-migration verification succeeds.
 
 ## Create one Codex identity per namespace
 

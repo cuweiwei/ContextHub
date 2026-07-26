@@ -15,6 +15,7 @@ import { registerSourceRoutes } from './routes/sources.js';
 import { registerStateRoutes } from './routes/state.js';
 import { registerMcpRoutes } from '../mcp/http.js';
 import { registerReviewUiRoutes } from './review-ui.js';
+import { registerExploreUiRoutes } from './explore-ui.js';
 
 export interface AppDeps {
   config: Config;
@@ -45,6 +46,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
 
   registerHealthRoutes(app, deps);
   registerReviewUiRoutes(app);
+  registerExploreUiRoutes(app);
   registerItemRoutes(app, deps);
   registerSourceRoutes(app, deps);
   registerClientRoutes(app, deps);
