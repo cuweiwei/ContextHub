@@ -2,8 +2,9 @@
 
 部署在私人 NAS 的**跨 AI 記憶權威平台**(system of record):Codex、Claude Code、個人/工作 Hermes 的唯一記憶來源。**Apps 透過 REST 寫入投影,AI agents 透過 MCP 讀寫記憶**;個人與工作記憶以 namespace 嚴格隔離,agent 寫入經信任升格(candidate→accepted)才成為共享事實,所有讀寫留稽核、所有版本與衝突裁決可追溯。
 
-可直接交給 AI agent 的操作與既有記憶遷移說明見
-[docs/AGENT-GUIDE.md](docs/AGENT-GUIDE.md)。完整設計見
+一般使用者的查看、審核與記憶遷移說明見
+[docs/USER-GUIDE.md](docs/USER-GUIDE.md)；可直接交給 AI agent 的操作與既有記憶
+遷移說明見 [docs/AGENT-GUIDE.md](docs/AGENT-GUIDE.md)。完整設計見
 [docs/DESIGN.md](docs/DESIGN.md);信任邊界與資料治理見
 [docs/ADR-001](docs/ADR-001-trust-boundary.md)。
 
@@ -143,5 +144,5 @@ src/
   cli.ts   # create-client/rotate-key/policy-*/review/candidates/audit/reindex/backup/purge/...
 scripts/   # e2e.sh(REST↔MCP 一致性+備份還原全流程)、restore.sh(NAS runbook)
 test/      # 100+ tests:隔離/信任/政策/稽核 fail-closed/idempotency/一致性/還原邊界
-docs/      # AGENT-GUIDE(agent 操作/記憶遷移)、CODEX、DESIGN、ADR-001
+docs/      # USER-GUIDE、AGENT-GUIDE(agent 操作/記憶遷移)、CODEX、DESIGN、ADR-001
 ```
