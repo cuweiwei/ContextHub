@@ -107,18 +107,40 @@ tailnet，而且只能取得本次工作所需 namespace 的 credential。
 
 ## 4. 把 agent 的既有記憶遷移進 ContextHub
 
+### 完整遷移的定義
+
+「完整遷移」是指盤點並處理使用者指定範圍內，目標 AI 產品、帳號、
+workspace 與本機裝置提供的**所有預期長期記憶來源**。不得只處理目前對話
+自動注入的 context，或目前 agent 恰好能直接讀取的一個 memory store，就宣稱全部完成。
+
+「所有記憶」是指所有已保存或可從正式來源抽取的 durable memories，包括：
+
+- 身分與個人背景
+- 家庭、伴侶、子女與重要人物關係
+- 工作、職務、公司與職涯背景
+- 偏好、習慣、長期目標與生活安排
+- 長期專案、重要決策與固定環境
+- 尚未完成的任務與承諾
+
+這不代表原封不動上傳聊天逐字稿、工具輸出、暫時資訊、secret 或整個記憶資料夾。
+如果任何預期來源仍無法存取，整體狀態必須是 `partial`，不可宣稱
+`complete` 或「所有 AI 記憶已完成遷移」。
+
 ### 遷移原則
 
 遷移不是把整個記憶資料夾原封不動上傳。正確流程是：
 
 ```text
-唯讀盤點舊記憶
+確認使用者指定的產品／帳號／workspace／裝置範圍
+→ 建立所有預期來源的 coverage matrix
+→ 唯讀盤點舊記憶
 → 分類與去除暫時資訊／secret
 → 拆成原子記憶
 → 搜尋 ContextHub 去重
 → 以原 agent credential 寫成 candidate
 → 使用者在 /review 審核
 → 從 /explore 與 search_context 驗證
+→ 回報各來源讀取／寫入／去重／排除數量
 → 舊記憶先改為唯讀，確認穩定後才清理
 ```
 
@@ -126,16 +148,91 @@ tailnet，而且只能取得本次工作所需 namespace 的 credential。
 `source=<agent client id>`、`authority=agent` provenance。不要為了快速匯入而使用
 `ADMIN_TOKEN` 偽裝成人類已確認資料，也不要跳過 candidate review。
 
-### Step 1：唯讀盤點
+### Step 0：記憶來源覆蓋稽核
 
-請先找出目前 agent 的長期記憶來源，但不要修改或刪除：
+寫入 ContextHub 前，先確認使用者要遷移哪些產品、帳號、workspace 與裝置。
+如果範圍不明確，必須先向使用者確認；可以先處理已確定的部分，但只能回報
+`partial`。
+
+接著列出所有可能存在於該範圍內的來源，至少檢查：
+
+- ChatGPT 帳號或 workspace 的 saved memories。
+- 目前 session 自動注入的 memory／personalization context。
+- 本機 Codex memory store，例如 `~/.codex/memories/`。
+- Codex memory extensions，例如 Chronicle 或其他 extension 提供的 store。
+- 使用者 profile、custom instructions 與 personalization。
+- 專案層、workspace 層的 durable memory files 或規則。
+- Claude Code、Hermes 或其他 agent 的 memory、profile、instructions。
+- 產品提供的官方 memory export。
+- 使用者明確提供的記憶匯出檔。
+
+「目前 session 有記憶」不等於「帳號的 saved memories 已完整列出」；
+「本機 Codex store 已處理」也不等於「其他產品或 workspace 已處理」。
+
+在第一次寫入前，必須先向使用者回報 coverage matrix。下表是必填格式，
+不是既有來源或數量的範例資料：
+
+| 來源 | 是否存在 | 是否可存取 | 來源項目數 | 涵蓋領域 | 處理方式 | 狀態 |
+|---|---:|---:|---:|---|---|---|
+| ChatGPT saved memories | 必填 | 必填 | 必填 | 必填 | 必填 | 必填 |
+| Local Codex memories | 必填 | 必填 | 必填 | 必填 | 必填 | 必填 |
+| Memory extensions | 必填 | 必填 | 必填 | 必填 | 必填 | 必填 |
+| Custom instructions/profile | 必填 | 必填 | 必填 | 必填 | 必填 | 必填 |
+| Other agents/exports | 必填 | 必填 | 必填 | 必填 | 必填 | 必填 |
+
+不得把 `unknown` 填成 `no` 或 `0`。來源的處理狀態使用：
+
+- `pending`：已發現，尚未處理。
+- `submitted_for_review`：已寫成 candidates，等待使用者審核。
+- `imported`：已完成審核與抽樣驗證。
+- `empty`：來源可存取，且確認沒有 durable memory。
+- `deduplicated`：來源內容已存在於 ContextHub，沒有新增。
+- `user-excluded`：使用者明確將來源排除在本次範圍外。
+- `inaccessible`：預期來源存在或可能存在，但目前無法列出。
+
+coverage matrix 要在每一批處理後更新，不能只在開始時建立一次。
+
+### Step 1：唯讀盤點所有可存取來源
+
+依 coverage matrix 逐一讀取可存取來源，但不要修改或刪除：
 
 - Codex：目前環境提供的 memory store，以及其指向的專案／rollout 摘要。
 - Claude Code：使用者或專案層的 `CLAUDE.md`、rules、memory files。
-- 其他 agent：其 profile、memory、instructions 或 exported memories。
+- ChatGPT：saved memories、custom instructions、personalization 或官方 export。
+- 其他 agent：其 profile、memory、instructions、extension store 或官方 export。
 
 `AGENTS.md`、`CLAUDE.md` 中的開發規則不一定都是「使用者記憶」。純 repository
 操作規範應留在 repo；只有跨工具、跨 session 值得共享的使用者偏好與專案事實才搬進 ContextHub。
+
+盤點時也要做個人領域覆蓋檢查。這份清單只用來檢查是否漏掉來源，不得推測或
+捏造不存在的資料：
+
+| 個人領域 | 狀態 | 來源或說明 |
+|---|---|---|
+| 身分與個人背景 |  |  |
+| 家庭、伴侶、子女與重要人物關係 |  |  |
+| 工作、職務、公司與職涯背景 |  |  |
+| 長期專案與重要決策 |  |  |
+| 溝通、語言及工具偏好 |  |  |
+| 日常習慣、生活安排與長期目標 |  |  |
+| 健康、財務及其他敏感個人資訊 |  |  |
+| 裝置、服務與固定環境 |  |  |
+| 未完成任務與承諾 |  |  |
+
+每個領域只能標記為：
+
+- `found-pending`（中間狀態）
+- `found-submitted-for-review`（中間狀態）
+- `found-and-migrated`
+- `found-and-deduplicated`
+- `confirmed-empty`
+- `inaccessible`
+- `user-excluded`
+
+健康、財務或其他敏感內容只有在使用者授權且確實具有長期價值時才遷移，並使用
+`sensitivity=private`。領域出現在檢查表中，不代表必須保存該領域的資料。
+完整遷移的最終報告不得保留兩個 `found-*` 中間狀態；任何 `inaccessible`
+領域也會使整體狀態保持 `partial`。
 
 ### Step 2：分類
 
@@ -152,6 +249,13 @@ tailnet，而且只能取得本次工作所需 namespace 的 credential。
 | 與 accepted item 衝突且新資料較可信 | `propose_successor` |
 
 工作資料還要先抽取成不含原文、PII 與機密細節的摘要。
+
+家庭、人物關係、個人職涯背景與穩定工作偏好，可以是 `personal` namespace
+中的個人記憶；「與工作有關」不代表一定只能放在 `work`。敏感的個人背景應使用
+`sensitivity=private`。
+
+`work` namespace 只保存經授權且精煉、長期有用的工作摘要、決議、行動項目與
+工作偏好，禁止保存工作原文、客戶 PII、逐字稿、未公開財務資訊與機密技術細節。
 
 ### Step 3：正規化與穩定識別
 
@@ -175,7 +279,7 @@ migration:claude-code:contexthub-trust-boundary
 
 ### Step 4：分批寫入
 
-每批建議 20 筆以內：
+每批最多 20 筆：
 
 1. 對該批每個主題呼叫 `search_context` 去重。
 2. 對真正需要遷移的項目呼叫 `save_memory`。
@@ -185,16 +289,53 @@ migration:claude-code:contexthub-trust-boundary
 
 不要一次匯入數百筆後才審核；錯誤分類會讓 inbox 難以處理。
 
-### Step 5：切換與回復策略
+每批還要更新 migration ledger，至少回報：
 
-1. 遷移完成後，舊記憶來源先保留且改為唯讀。
-2. 用以下問題做抽樣驗證：
+| 來源 | 已讀取 | 寫入 candidates | 去重 | 排除 | 排除原因 | 待處理 |
+|---|---:|---:|---:|---:|---|---:|
+|  |  |  |  |  |  |  |
+
+排除原因至少區分：暫時資訊、已完成一次性工作、secret、raw transcript、
+repository-only 規則、使用者排除，以及不符合 work namespace 規則。
+
+### Step 5：無法存取來源時
+
+如果 agent 無法列出某個預期 saved-memory store：
+
+1. 明確說明無法存取的產品、帳號、workspace、裝置或 extension。
+2. 請使用者提供官方 export，或授權能列出該來源的 connector／工具。
+3. 不得根據目前對話或其他 store 猜測缺失內容。
+4. 不得把該來源標記為 `empty`、`imported` 或 `deduplicated`。
+5. 可以繼續遷移已取得的來源，但整體狀態必須是 `partial`。
+
+只有使用者明確把該來源排除在範圍外，才可從 `inaccessible` 改為
+`user-excluded`。
+
+### Step 6：切換、驗證與完成判定
+
+1. 所有已遷移的舊記憶來源先保留且改為唯讀。
+2. 完成使用者的 candidate review。
+3. 用以下問題做跨領域抽樣驗證：
    - 使用者有哪些穩定偏好？
+   - 使用者有哪些已授權保存的重要人物或長期背景？
    - 目前 ContextHub 專案的安全邊界是什麼？
    - NAS 與遠端存取的已確認設定是什麼？
+   - 有哪些尚未完成的長期任務？
    - 是否存在互相衝突的 current items？
-3. 確認新的 agent session 能只靠 ContextHub 找到上述內容。
-4. 經過至少一輪實際使用與備份後，再由使用者決定是否清理舊記憶。
+4. 確認新的 agent session 能只靠 ContextHub 找到上述 accepted items。
+5. 更新 coverage matrix 與 migration ledger 的最終數量。
+6. 經過至少一輪實際使用與備份後，再由使用者決定是否清理舊記憶。
+
+只有所有預期來源都成為 `imported`、`empty`、`deduplicated` 或
+`user-excluded`，而且使用者完成審核、新 session 查詢成功，整體狀態才可以是
+`complete`。
+
+只要仍有 `pending`、`submitted_for_review` 或 `inaccessible`，結論必須明確寫成：
+
+```text
+已完成可存取部分；整體遷移尚未完成。
+overall_migration_status: partial
+```
 
 遷移失敗時不需 rollback ContextHub schema：拒絕錯誤 candidates、對錯誤 accepted item
 提出 successor／revoke，並繼續使用尚未刪除的舊記憶來源。
@@ -202,20 +343,40 @@ migration:claude-code:contexthub-trust-boundary
 ## 5. 可直接交給 agent 的 migration prompt
 
 ```text
-請把你目前可讀取的既有長期記憶遷移到 ContextHub。
+請依照 AGENT-GUIDE.md，完整遷移指定範圍內的既有長期記憶到 ContextHub。
 
 規則：
-1. 先唯讀盤點，不要修改或刪除舊記憶。
-2. 只遷移跨 session 有價值的偏好、事實、人物、專案決策與未完成任務。
-3. 不遷移 secret、token、密碼、raw transcript、工具 log 或一次性對話細節。
-4. Work namespace 只能存抽取後摘要；禁止原文、PII、客戶資料、未公開財務與機密技術細節。
-5. 每筆只包含一個可獨立審核的主張。
-6. 每筆寫入前先用 search_context 去重；相同就跳過，舊 accepted 記憶需要修正時用 propose_successor。
-7. 使用 save_memory 寫入；source_item_id 使用 migration:<agent>:<stable-key>，
+1. 先確認我要遷移的產品、帳號、workspace 與裝置範圍。不得把目前 session
+   自動注入的 memory 或單一可讀 store 當成全部來源。
+2. 在任何寫入前，先列出 ChatGPT saved memories、本機 Codex memories、
+   memory extensions、custom instructions/profile、專案或 workspace memories、
+   其他 agent stores 與官方／使用者匯出檔，回報 coverage matrix，包括是否存在、
+   是否可存取、來源項目數、涵蓋領域、處理方式與狀態。
+3. 逐項回報個人領域覆蓋狀態：身分背景、家庭與重要人物、工作與職涯、
+   長期專案與決策、溝通與工具偏好、習慣與長期目標、健康與財務、
+   裝置與固定環境、未完成任務。不得猜測不存在的資料。
+4. 如果任何預期來源無法存取，說明是哪個產品、帳號或 workspace，請我提供
+   官方 export 或授權 connector；可先處理其他來源，但整體狀態必須是 partial。
+5. 對可存取來源先做唯讀盤點，不要修改或刪除舊記憶。
+6. 只遷移跨 session 有價值的偏好、事實、人物、專案決策與未完成任務；
+   不遷移 secret、token、密碼、raw transcript、工具 log 或一次性對話細節。
+7. 家庭、人物、個人職涯背景與穩定工作偏好可存入 personal；敏感內容使用
+   sensitivity=private。Work namespace 只能存抽取後摘要，禁止原文、PII、
+   客戶資料、未公開財務與機密技術細節。
+8. 每筆只包含一個可獨立審核的主張。寫入前先用 search_context 去重；
+   相同就跳過，舊 accepted 記憶需要修正時用 propose_successor。
+9. 使用 save_memory 寫入；source_item_id 使用 migration:<agent>:<stable-key>，
    每個新操作產生 fresh UUID idempotency_key。
-8. 每批最多 20 筆，寫完用 my_candidates 回報 item id、title、type 與 trust_state，等待我審核後再繼續。
-9. 不使用 ADMIN_TOKEN，不把 candidate 當成已確認事實。
-10. 完成後從 search_context 抽樣驗證；舊記憶保持唯讀，不要刪除。
+10. 每批最多 20 筆。寫完用 my_candidates 回報 item id、title、type 與
+    trust_state，並回報各來源的讀取、寫入、去重、排除、排除原因與待處理
+    數量；等待我在 /review 審核後再繼續。
+11. 不使用 ADMIN_TOKEN，不把 candidate 當成已確認事實。
+12. 所有預期來源都標記為 imported、empty、deduplicated 或 user-excluded，
+    且我已完成審核、新 agent session 能查詢 accepted items，才能宣稱 complete。
+    只要仍有 pending、submitted_for_review 或 inaccessible，結論必須寫：
+    「已完成可存取部分；整體遷移尚未完成。」並標記
+    overall_migration_status: partial。
+13. 舊記憶保持唯讀，不要刪除；經過實際使用與備份後再由我決定是否清理。
 ```
 
 ## 6. 人類如何查看與審核
@@ -237,9 +398,11 @@ items；`/review` 顯示同 namespace 的 candidate inbox。
 4. Private items 是否超過這把 key 的 sensitivity ceiling。
 5. Candidate 是否還沒被接受。
 
-## 7. 完成標準
+## 7. Agent 連線與遷移完成標準
 
-Agent 的 ContextHub 整合只有在以下條件全部成立時才算完成：
+### 連線整合完成
+
+Agent 的 ContextHub 連線整合只有在以下條件全部成立時才算完成：
 
 - 能呼叫 `list_context_sources` 與 `get_context_brief`。
 - 搜尋結果只包含 credential 所屬 namespace 可讀內容。
@@ -247,3 +410,23 @@ Agent 的 ContextHub 整合只有在以下條件全部成立時才算完成：
 - 使用者能在 `/review` 審核。
 - Accepted 後能在 `/explore` 與新的 agent session 搜尋到。
 - 舊記憶尚未刪除，且 ContextHub 備份／還原流程已存在。
+
+### 完整遷移完成
+
+完整遷移只有在以下條件全部成立時才可標記
+`overall_migration_status: complete`：
+
+- 使用者指定的產品、帳號、workspace 與裝置範圍已明確。
+- 所有預期記憶來源都已列入 coverage matrix。
+- 每個來源都標記為 `imported`、`empty`、`deduplicated` 或
+  `user-excluded`。
+- 沒有 `pending`、`submitted_for_review` 或 `inaccessible` 來源。
+- 個人領域覆蓋清單已逐項核對，沒有空白、`found-pending`、
+  `found-submitted-for-review` 或 `inaccessible` 狀態。
+- 已回報各來源的讀取數、寫入數、去重數、排除數、排除原因與待處理數。
+- 使用者已完成 candidate review。
+- Accepted items 能從全新的 agent session 查詢。
+- 舊記憶仍保留唯讀版本，且至少有一份可還原的 ContextHub 備份。
+
+如果其中任何一項未成立，只能標記
+`overall_migration_status: partial`，並列出仍缺少的來源與下一個具體動作。
