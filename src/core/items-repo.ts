@@ -9,8 +9,11 @@ import {
   type Authority,
   type CompactItem,
   type ContextItem,
+  type DecayPolicy,
+  type InformationClass,
   type ItemStatus,
   type ListFilters,
+  type MemoryKind,
   type NewItem,
   type PatchItem,
   type PrincipalKind,
@@ -28,6 +31,52 @@ const RRF_K = 60;
 /** Types whose relevance should NOT decay with age (durable knowledge). */
 const NO_DECAY_TYPES = new Set(['fact', 'state', 'contact', 'preference', 'memory']);
 const DEFAULT_INSIGHT_CONFIDENCE = 0.7;
+
+const TYPE_MEMORY_KIND: Readonly<Record<string, MemoryKind | undefined>> = {
+  fact: 'fact',
+  preference: 'preference',
+  decision: 'decision',
+  experience: 'experience',
+  procedure: 'procedure',
+  contact: 'relationship',
+  relationship: 'relationship',
+  task: 'working_state',
+  state: 'working_state',
+  working_state: 'working_state',
+};
+
+function inferredMemoryKind(type: string, requested?: MemoryKind): MemoryKind | null {
+  return requested ?? TYPE_MEMORY_KIND[type] ?? null;
+}
+
+function memoryKindForItem(authority: Authority, type: string, requested?: MemoryKind): MemoryKind | null {
+  if (requested) return requested;
+  if (authority === 'app' && type !== 'insight') return null;
+  return inferredMemoryKind(type);
+}
+
+function inferredInformationClass(
+  authority: Authority,
+  type: string,
+  memoryKind: MemoryKind | null,
+): InformationClass {
+  if (memoryKind || authority !== 'app' || type === 'insight') return 'memory';
+  return 'source';
+}
+
+function inferredDecayPolicy(kind: MemoryKind | null, requested?: DecayPolicy): DecayPolicy | null {
+  if (requested) return requested;
+  if (kind === 'working_state') return 'rapid';
+  if (kind === 'experience') return 'standard';
+  if (kind) return 'none';
+  return null;
+}
+
+function validateValidityWindow(validFrom: string | null | undefined, validUntil: string | null | undefined): void {
+  if (validFrom && validUntil && validUntil <= validFrom) {
+    throw new ValidationError('valid_until must be later than valid_from');
+  }
+}
 
 /** Server-derived identity of the writer — never taken from request bodies. */
 export interface WriteContext {
@@ -135,11 +184,17 @@ interface ItemRow {
   accepted_at: string | null;
   acceptance_policy_version: number | null;
   acceptance_rule_id: string | null;
+  information_class: InformationClass;
+  memory_kind: MemoryKind | null;
   confidence: number | null;
   occurred_at: string | null;
   created_at: string;
   updated_at: string;
   expires_at: string | null;
+  valid_from: string | null;
+  valid_until: string | null;
+  last_verified_at: string | null;
+  decay_policy: DecayPolicy | null;
   source_item_id: string | null;
   source_uri: string | null;
   revision: number;
@@ -174,11 +229,17 @@ function rowToItem(row: ItemRow): ContextItem {
     accepted_at: row.accepted_at,
     acceptance_policy_version: row.acceptance_policy_version,
     acceptance_rule_id: row.acceptance_rule_id,
+    information_class: row.information_class,
+    memory_kind: row.memory_kind,
     confidence: row.confidence,
     occurred_at: row.occurred_at,
     created_at: row.created_at,
     updated_at: row.updated_at,
     expires_at: row.expires_at,
+    valid_from: row.valid_from,
+    valid_until: row.valid_until,
+    last_verified_at: row.last_verified_at,
+    decay_policy: row.decay_policy,
     source_item_id: row.source_item_id,
     source_uri: row.source_uri,
     revision: row.revision,
@@ -205,6 +266,8 @@ export function toCompact(item: ContextItem, queryTokens: string[] = []): Compac
     authority: item.authority,
     status: item.status,
     trust_state: item.trust_state,
+    information_class: item.information_class,
+    memory_kind: item.memory_kind,
     confidence: item.confidence,
     occurred_at: item.occurred_at,
     created_at: item.created_at,
@@ -238,13 +301,16 @@ function lifecycleFactor(item: ContextItem, now: number): number {
   if (item.trust_state === 'candidate') factor *= 0.5;
 
   let halfLifeDays: number | null;
-  if (NO_DECAY_TYPES.has(item.type)) halfLifeDays = null;
+  if (item.decay_policy === 'none') halfLifeDays = null;
+  else if (item.decay_policy === 'rapid') halfLifeDays = 14;
+  else if (item.decay_policy === 'standard') halfLifeDays = 90;
+  else if (NO_DECAY_TYPES.has(item.type)) halfLifeDays = null;
   else if (item.type === 'task') halfLifeDays = item.status === 'active' ? null : 30;
   else if (item.type === 'insight') halfLifeDays = 90;
   else halfLifeDays = 30;
 
   if (halfLifeDays !== null) {
-    const ts = Date.parse(item.occurred_at ?? item.created_at);
+    const ts = Date.parse(item.last_verified_at ?? item.occurred_at ?? item.valid_from ?? item.created_at);
     const ageDays = Math.max(0, (now - ts) / 86_400_000);
     factor *= Math.pow(0.5, ageDays / halfLifeDays);
   }
@@ -266,15 +332,17 @@ export function createItemsRepo(db: DB) {
     INSERT INTO context_items (
       id, source, namespace, type, title, content, data, tags, entities, sensitivity,
       authority, status, trust_state, acceptance_method, accepted_by, accepted_at,
-      acceptance_policy_version, acceptance_rule_id, confidence, occurred_at, created_at,
-      updated_at, expires_at, source_item_id, source_uri, revision, idempotency_key,
+      acceptance_policy_version, acceptance_rule_id, information_class, memory_kind,
+      confidence, occurred_at, created_at, updated_at, expires_at, valid_from, valid_until,
+      last_verified_at, decay_policy, source_item_id, source_uri, revision, idempotency_key,
       successor_of, state_kind, state_key, schema_id
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const contentUpdateStmt = db.prepare(`
     UPDATE context_items SET type = ?, title = ?, content = ?, data = ?, tags = ?,
       entities = ?, sensitivity = ?, status = ?, confidence = ?,
-      occurred_at = ?, expires_at = ?, source_uri = ?, revision = ?, updated_at = ?
+      occurred_at = ?, expires_at = ?, valid_from = ?, valid_until = ?,
+      last_verified_at = ?, decay_policy = ?, source_uri = ?, revision = ?, updated_at = ?
     WHERE id = ?
   `);
   const ftsInsert = db.prepare('INSERT INTO items_fts (rowid, title, content, tags) VALUES (?, ?, ?, ?)');
@@ -347,6 +415,7 @@ export function createItemsRepo(db: DB) {
 
   /** Full replace of an existing row from a NewItem (projection upsert). */
   function replaceRow(existing: ItemRow, input: NewItem, sensitivity: Sensitivity, actor: string): ContextItem {
+    validateValidityWindow(input.valid_from, input.valid_until);
     const current = rowToItem(existing);
     const next: ContextItem = {
       ...current,
@@ -361,6 +430,13 @@ export function createItemsRepo(db: DB) {
       confidence: input.confidence ?? null,
       occurred_at: input.occurred_at ?? null,
       expires_at: input.expires_at ?? null,
+      valid_from: input.valid_from ?? null,
+      valid_until: input.valid_until ?? null,
+      last_verified_at: input.last_verified_at ?? null,
+      decay_policy:
+        current.information_class === 'memory'
+          ? inferredDecayPolicy(current.memory_kind, input.decay_policy)
+          : null,
       source_uri: input.source_uri ?? null,
       revision: current.revision + 1,
       updated_at: new Date().toISOString(),
@@ -370,7 +446,8 @@ export function createItemsRepo(db: DB) {
       next.data === null ? null : JSON.stringify(next.data),
       JSON.stringify(next.tags), JSON.stringify(next.entities),
       next.sensitivity, next.status, next.confidence,
-      next.occurred_at, next.expires_at, next.source_uri,
+      next.occurred_at, next.expires_at, next.valid_from, next.valid_until,
+      next.last_verified_at, next.decay_policy, next.source_uri,
       next.revision, next.updated_at, next.id,
     );
     reindexItem(next.id, next);
@@ -429,14 +506,19 @@ export function createItemsRepo(db: DB) {
 
     if (existing.trust_state === 'candidate') {
       // In-place refresh of the writer's own unreviewed candidate.
+      validateValidityWindow(input.valid_from, input.valid_until);
       const evidenceSensitivity =
         input.type === 'insight' ? validateEvidence(input.derived_from, writer, existing.id) : 'normal';
       const nextSensitivity = evidenceSensitivity === 'private' ? 'private' : input.sensitivity;
+      const nextMemoryKind = memoryKindForItem(existing.authority, existing.type, input.memory_kind);
+      const nextInformationClass = inferredInformationClass(existing.authority, existing.type, nextMemoryKind);
       const now = new Date().toISOString();
       const res = db
         .prepare(
           `UPDATE context_items SET title = ?, content = ?, data = ?, tags = ?, entities = ?,
-             sensitivity = ?, confidence = ?, occurred_at = ?, expires_at = ?, source_uri = ?,
+             sensitivity = ?, information_class = ?, memory_kind = ?, confidence = ?,
+             occurred_at = ?, expires_at = ?, valid_from = ?, valid_until = ?,
+             last_verified_at = ?, decay_policy = ?, source_uri = ?,
              revision = revision + 1, updated_at = ?
            WHERE id = ? AND trust_state = 'candidate'`,
         )
@@ -444,8 +526,11 @@ export function createItemsRepo(db: DB) {
           input.title, input.content,
           input.data === undefined ? null : JSON.stringify(input.data),
           JSON.stringify(input.tags), JSON.stringify(input.entities),
-          nextSensitivity, input.confidence ?? null,
-          input.occurred_at ?? null, input.expires_at ?? null, input.source_uri ?? null,
+          nextSensitivity, nextInformationClass, nextMemoryKind, input.confidence ?? null,
+          input.occurred_at ?? null, input.expires_at ?? null,
+          input.valid_from ?? null, input.valid_until ?? null,
+          input.last_verified_at ?? null, inferredDecayPolicy(nextMemoryKind, input.decay_policy),
+          input.source_uri ?? null,
           now, existing.id,
         );
       if (res.changes === 0) {
@@ -481,6 +566,7 @@ export function createItemsRepo(db: DB) {
       trust: TrustDecision,
       extras: { successorOf?: string } = {},
     ): { item: ContextItem; created: boolean } => {
+      validateValidityWindow(input.valid_from, input.valid_until);
       if (input.derived_from.length > 0 && input.type !== 'insight') {
         throw new ValidationError('derived_from is only allowed on insight items');
       }
@@ -522,6 +608,8 @@ export function createItemsRepo(db: DB) {
 
       const now = new Date().toISOString();
       const accepted = trust.trustState === 'accepted';
+      const memoryKind = memoryKindForItem(authority, input.type, input.memory_kind);
+      const informationClass = inferredInformationClass(authority, input.type, memoryKind);
       const item: ContextItem = {
         id: ulid(),
         source: writer.clientId,
@@ -541,11 +629,18 @@ export function createItemsRepo(db: DB) {
         accepted_at: accepted ? now : null,
         acceptance_policy_version: accepted ? trust.policyVersion : null,
         acceptance_rule_id: accepted ? trust.ruleId : null,
+        information_class: informationClass,
+        memory_kind: informationClass === 'memory' ? memoryKind : null,
         confidence: input.confidence ?? null,
         occurred_at: input.occurred_at ?? null,
         created_at: now,
         updated_at: now,
         expires_at: input.expires_at ?? null,
+        valid_from: input.valid_from ?? null,
+        valid_until: input.valid_until ?? null,
+        last_verified_at: input.last_verified_at ?? null,
+        decay_policy:
+          informationClass === 'memory' ? inferredDecayPolicy(memoryKind, input.decay_policy) : null,
         source_item_id: input.source_item_id ?? null,
         source_uri: input.source_uri ?? null,
         revision: 1,
@@ -566,8 +661,10 @@ export function createItemsRepo(db: DB) {
         item.sensitivity, item.authority, item.status,
         item.trust_state, item.acceptance_method, item.accepted_by, item.accepted_at,
         item.acceptance_policy_version, item.acceptance_rule_id,
+        item.information_class, item.memory_kind,
         item.confidence, item.occurred_at, item.created_at, item.updated_at,
-        item.expires_at, item.source_item_id, item.source_uri, item.revision,
+        item.expires_at, item.valid_from, item.valid_until, item.last_verified_at,
+        item.decay_policy, item.source_item_id, item.source_uri, item.revision,
         input.idempotency_key ?? null,
         item.successor_of, item.state_kind, item.state_key, item.schema_id,
       );
@@ -667,16 +764,22 @@ export function createItemsRepo(db: DB) {
         ...('confidence' in patch ? { confidence: patch.confidence ?? null } : {}),
         ...('occurred_at' in patch ? { occurred_at: patch.occurred_at ?? null } : {}),
         ...('expires_at' in patch ? { expires_at: patch.expires_at ?? null } : {}),
+        ...('valid_from' in patch ? { valid_from: patch.valid_from ?? null } : {}),
+        ...('valid_until' in patch ? { valid_until: patch.valid_until ?? null } : {}),
+        ...('last_verified_at' in patch ? { last_verified_at: patch.last_verified_at ?? null } : {}),
+        ...('decay_policy' in patch ? { decay_policy: patch.decay_policy ?? null } : {}),
         ...('source_uri' in patch ? { source_uri: patch.source_uri ?? null } : {}),
         revision: current.revision + 1,
         updated_at: new Date().toISOString(),
       };
+      validateValidityWindow(next.valid_from, next.valid_until);
       contentUpdateStmt.run(
         next.type, next.title, next.content,
         next.data === null ? null : JSON.stringify(next.data),
         JSON.stringify(next.tags), JSON.stringify(next.entities),
         next.sensitivity, next.status, next.confidence,
-        next.occurred_at, next.expires_at, next.source_uri,
+        next.occurred_at, next.expires_at, next.valid_from, next.valid_until,
+        next.last_verified_at, next.decay_policy, next.source_uri,
         next.revision, next.updated_at, next.id,
       );
       reindexItem(id, next);
@@ -853,6 +956,10 @@ export function createItemsRepo(db: DB) {
 
     where.push(`${alias}.deleted = 0`);
     where.push(`(${alias}.expires_at IS NULL OR ${alias}.expires_at > ?)`);
+    params.push(now);
+    where.push(`(${alias}.valid_from IS NULL OR ${alias}.valid_from <= ?)`);
+    params.push(now);
+    where.push(`(${alias}.valid_until IS NULL OR ${alias}.valid_until > ?)`);
     params.push(now);
     // Operational state slots have their own read surface (state rules).
     where.push(`(${alias}.state_kind IS NULL OR ${alias}.state_kind != 'operational')`);
@@ -1063,6 +1170,9 @@ export function createItemsRepo(db: DB) {
            AND (? IS NULL OR i.namespace = ?)
            AND i.trust_state = 'accepted'
            AND (i.state_kind IS NULL OR i.state_kind != 'operational')
+           AND (i.expires_at IS NULL OR i.expires_at > strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+           AND (i.valid_from IS NULL OR i.valid_from <= strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+           AND (i.valid_until IS NULL OR i.valid_until > strftime('%Y-%m-%dT%H:%M:%fZ','now'))
            AND (? = 'private' OR i.sensitivity = 'normal')
          GROUP BY i.source, i.type`,
       )
@@ -1261,11 +1371,17 @@ export function createItemsRepo(db: DB) {
           accepted_at: now,
           acceptance_policy_version: trust.policyVersion,
           acceptance_rule_id: trust.ruleId,
+          information_class: 'task_state',
+          memory_kind: null,
           confidence: null,
           occurred_at: null,
           created_at: now,
           updated_at: now,
           expires_at: input.expiresAt ?? null,
+          valid_from: null,
+          valid_until: null,
+          last_verified_at: input.observedAt ?? now,
+          decay_policy: null,
           source_item_id: null,
           source_uri: null,
           revision: 1,
@@ -1285,8 +1401,10 @@ export function createItemsRepo(db: DB) {
           '[]', '[]', item.sensitivity, item.authority, item.status,
           item.trust_state, item.acceptance_method, item.accepted_by, item.accepted_at,
           item.acceptance_policy_version, item.acceptance_rule_id,
+          item.information_class, item.memory_kind,
           null, null, item.created_at, item.updated_at,
-          item.expires_at, null, null, 1, null,
+          item.expires_at, null, null, item.last_verified_at, null,
+          null, null, 1, null,
           null, item.state_kind, item.state_key, item.schema_id,
         );
         writeVersion(item, 'create', writer.clientId);
@@ -1310,12 +1428,13 @@ export function createItemsRepo(db: DB) {
         data,
         status: input.status ?? current.status,
         expires_at: input.expiresAt !== undefined ? input.expiresAt : current.expires_at,
+        last_verified_at: input.observedAt ?? current.last_verified_at,
         revision: current.revision + 1,
         updated_at: now,
       };
       db.prepare(
-        'UPDATE context_items SET data = ?, status = ?, expires_at = ?, revision = ?, updated_at = ? WHERE id = ?',
-      ).run(JSON.stringify(next.data), next.status, next.expires_at, next.revision, next.updated_at, next.id);
+        'UPDATE context_items SET data = ?, status = ?, expires_at = ?, last_verified_at = ?, revision = ?, updated_at = ? WHERE id = ?',
+      ).run(JSON.stringify(next.data), next.status, next.expires_at, next.last_verified_at, next.revision, next.updated_at, next.id);
       writeVersion(next, 'state_update', writer.clientId);
       return { item: next, created: false };
     })();

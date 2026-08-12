@@ -22,6 +22,8 @@ import {
   type PolicyV1,
 } from './policy.js';
 import type { PoliciesRepo } from './policies-repo.js';
+import { compileContextPackage, type ContextTarget } from './context-compiler.js';
+import { ulid } from './ids.js';
 import {
   accessFor,
   resolveAuthority,
@@ -88,6 +90,26 @@ export interface TaskAction {
 const OPERATE_KINDS = new Set(['set_status', 'set_progress', 'set_blocked', 'complete_checklist_item']);
 
 export type Commands = ReturnType<typeof createCommands>;
+
+/** Deterministic local intent expansion for the context compiler. */
+function contextRetrievalQueries(intent: string, related: string[] = []): string[] {
+  const queries = new Set<string>();
+  const add = (value: string) => {
+    const trimmed = value.trim();
+    if (trimmed) queries.add(trimmed);
+  };
+  add(intent);
+  for (const query of related) add(query);
+  for (const part of intent.match(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]+|[\p{L}\p{N}_-]+/gu) ?? []) {
+    if (/^[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]+$/u.test(part)) {
+      const chars = [...part];
+      for (let i = 0; i < chars.length - 1; i++) add(chars.slice(i, i + 2).join(''));
+    } else if (part.length >= 3) {
+      add(part);
+    }
+  }
+  return [...queries].slice(0, 20);
+}
 
 export function createCommands(deps: CommandDeps) {
   const { db, itemsRepo, clientsRepo, policiesRepo, auditRepo } = deps;
@@ -476,6 +498,10 @@ export function createCommands(deps: CommandDeps) {
           ...(patch.confidence !== undefined ? { confidence: patch.confidence } : {}),
           ...('occurred_at' in patch ? { occurred_at: patch.occurred_at } : {}),
           ...('expires_at' in patch ? { expires_at: patch.expires_at } : {}),
+          ...('valid_from' in patch ? { valid_from: patch.valid_from } : {}),
+          ...('valid_until' in patch ? { valid_until: patch.valid_until } : {}),
+          ...('last_verified_at' in patch ? { last_verified_at: patch.last_verified_at } : {}),
+          ...('decay_policy' in patch ? { decay_policy: patch.decay_policy } : {}),
           expected_revision: patch.expected_revision,
         };
         const item = itemsRepo.update(itemId, allowed, ctx.client.id);
@@ -790,6 +816,124 @@ export function createCommands(deps: CommandDeps) {
       }
       return itemsRepo.getStateByKey(ctx.client.namespace, stateKey);
     });
+  }
+
+  /**
+   * Build an ephemeral context package from accepted, currently-valid rows.
+   * The task text is used for retrieval but never written to audit details or
+   * persisted as a context item.
+   */
+  function compileContext(
+    client: ClientAuth,
+    opts: {
+      intent: string;
+      queries?: string[];
+      target: ContextTarget;
+      tokenBudget: number;
+      filters?: Parameters<ItemsRepo['search']>[1]['filters'];
+      stateKeys?: string[];
+    },
+  ) {
+    return readAudited(
+      client,
+      'read.compile_context',
+      client.isAdmin ? null : 'memory.read_accepted',
+      {
+        query_count: 1 + (opts.queries?.length ?? 0),
+        target: opts.target,
+        token_budget: opts.tokenBudget,
+        state_key_count: opts.stateKeys?.length ?? 0,
+      },
+      (ctx) => {
+        if (ctx.client.isAdmin) {
+          throw new ValidationError('context compilation requires a namespace-bound client');
+        }
+        const retrievalQueries = contextRetrievalQueries(opts.intent, opts.queries);
+        const found = itemsRepo.search(ctx.access, {
+          queries: retrievalQueries,
+          filters: { ...opts.filters, statuses: ['active'] },
+          limit: 100,
+          surface: 'accepted',
+        });
+        const scoreById = new Map(found.items.map((item) => [item.id, item.score]));
+        const candidates = found.fullItems.map((item) => ({ item, score: scoreById.get(item.id) ?? 0 }));
+
+        for (const stateKey of new Set(opts.stateKeys ?? [])) {
+          requireCap(ctx, 'state.read');
+          const rule = stateRuleFor(ctx.policy!, stateKey);
+          if (!rule || !rule.read_clients.includes(ctx.client.id)) {
+            throw new PolicyDeniedError(`no state rule allows client "${ctx.client.id}" to read "${stateKey}"`);
+          }
+          const item = itemsRepo.getStateByKey(ctx.client.namespace, stateKey);
+          if (!item || item.status !== 'active' || (item.expires_at && item.expires_at <= new Date().toISOString())) {
+            continue;
+          }
+          candidates.push({ item, score: 1 });
+        }
+
+        return compileContextPackage({
+          namespace: ctx.client.namespace,
+          target: opts.target,
+          tokenBudget: opts.tokenBudget,
+          candidates,
+        });
+      },
+    );
+  }
+
+  /**
+   * Coarse feedback for the memory-quality KPI: did compiled context change
+   * the action, and was the result helpful? No prompt, action text, or package
+   * content is retained.
+   */
+  function recordContextOutcome(
+    client: ClientAuth,
+    input: {
+      package_id: string;
+      item_ids: string[];
+      outcome: 'helpful' | 'mixed' | 'harmful' | 'unknown';
+      action_changed: boolean;
+    },
+    idempotencyKey: string,
+  ) {
+    const { result, replayed } = runMutation(
+      client,
+      'write.context_outcome',
+      idempotencyKey,
+      input,
+      {},
+      (ctx) => {
+        if (ctx.client.isAdmin) {
+          throw new ValidationError('context outcome feedback requires a namespace-bound client');
+        }
+        requireCap(ctx, 'memory.read_accepted');
+        const itemIds = [...new Set(input.item_ids)];
+        for (const id of itemIds) {
+          const item = itemsRepo.get(ctx.access, id);
+          if (!item || item.trust_state !== 'accepted') {
+            throw new ValidationError(`context item "${id}" does not exist or is not readable`);
+          }
+        }
+        const id = ulid();
+        const createdAt = new Date().toISOString();
+        db.prepare(
+          `INSERT INTO context_outcomes
+             (id, package_id, namespace, client_id, outcome, action_changed, item_ids, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          id,
+          input.package_id,
+          ctx.client.namespace,
+          ctx.client.id,
+          input.outcome,
+          input.action_changed ? 1 : 0,
+          JSON.stringify(itemIds),
+          createdAt,
+        );
+        return { id, package_id: input.package_id, item_ids: itemIds, created_at: createdAt };
+      },
+    );
+    return { ...result, replayed };
   }
 
   function softDeleteItem(
@@ -1136,6 +1280,8 @@ export function createCommands(deps: CommandDeps) {
     curateNote,
     updateOperationalState,
     readOperationalState,
+    compileContext,
+    recordContextOutcome,
     softDeleteItem,
     purgeItem,
     search,

@@ -13,6 +13,7 @@ import { registerItemRoutes } from './routes/items.js';
 import { registerPolicyRoutes } from './routes/policies.js';
 import { registerSourceRoutes } from './routes/sources.js';
 import { registerStateRoutes } from './routes/state.js';
+import { registerContextRoutes } from './routes/context.js';
 import { registerMcpRoutes } from '../mcp/http.js';
 import { registerReviewUiRoutes } from './review-ui.js';
 import { registerExploreUiRoutes } from './explore-ui.js';
@@ -53,6 +54,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   registerPolicyRoutes(app, deps);
   registerAuditRoutes(app, deps);
   registerStateRoutes(app, deps);
+  registerContextRoutes(app, deps);
   registerMcpRoutes(app, deps);
 
   return app;

@@ -53,6 +53,38 @@ describe('items-repo', () => {
     expect(fetched.acceptance_method).toBe('policy');
     expect(fetched.acceptance_policy_version).toBe(1);
     expect(fetched.acceptance_rule_id).toBe('test-rule');
+    expect(fetched.information_class).toBe('source');
+    expect(fetched.memory_kind).toBeNull();
+  });
+
+  it('separates source projections from typed memories with explicit lifecycle metadata', () => {
+    const source = insert('finance', makeItem({ type: 'fact', title: 'app 投影的事實' })).item;
+    expect(source.information_class).toBe('source');
+    expect(source.memory_kind).toBeNull();
+
+    const memory = insert(
+      'hermes',
+      makeItem({
+        type: 'memory',
+        title: '部署前先做相容性檢查',
+        memory_kind: 'procedure',
+        valid_from: '2026-01-01T00:00:00Z',
+        last_verified_at: '2026-08-01T00:00:00Z',
+      }),
+      { authority: 'agent', principalKind: 'agent' },
+    ).item;
+    expect(memory.information_class).toBe('memory');
+    expect(memory.memory_kind).toBe('procedure');
+    expect(memory.decay_policy).toBe('none');
+    expect(memory.valid_from).toBe('2026-01-01T00:00:00.000Z');
+    expect(memory.last_verified_at).toBe('2026-08-01T00:00:00.000Z');
+
+    const extracted = insert(
+      'source-app',
+      makeItem({ type: 'note', title: 'app 萃取的經驗', memory_kind: 'experience' }),
+    ).item;
+    expect(extracted.information_class).toBe('memory');
+    expect(extracted.decay_policy).toBe('standard');
   });
 
   it('is idempotent per (source, idempotency_key)', () => {
@@ -175,6 +207,20 @@ describe('items-repo', () => {
     expect(env.itemsRepo.search(ADMIN_ACCESS, { queries: ['過期'], limit: 10, surface: 'accepted' }).totalMatched).toBe(0);
     expect(env.itemsRepo.get(ADMIN_ACCESS, deleted.item.id)).toBeNull();
     expect(env.itemsRepo.get(ADMIN_ACCESS, expired.item.id)).not.toBeNull();
+  });
+
+  it('excludes not-yet-valid and no-longer-valid assertions from every list-shaped read', () => {
+    const future = new Date(Date.now() + 86_400_000).toISOString();
+    const past = new Date(Date.now() - 86_400_000).toISOString();
+    insert('a', makeItem({ title: '尚未生效', valid_from: future }));
+    insert('a', makeItem({ title: '已經失效', valid_until: past }));
+    insert('a', makeItem({ title: '目前有效', valid_from: past, valid_until: future }));
+    const listed = env.itemsRepo.list(ADMIN_ACCESS, { limit: 10, sort: 'created', surface: 'accepted' });
+    expect(listed.items.map((item) => item.title)).toEqual(['目前有效']);
+    expect(env.itemsRepo.search(ADMIN_ACCESS, { queries: ['生效'], limit: 10, surface: 'accepted' }).totalMatched).toBe(0);
+    expect(() => insert('a', makeItem({ title: '反向區間', valid_from: future, valid_until: past }))).toThrow(
+      ValidationError,
+    );
   });
 
   it('re-indexes FTS on update and bumps revision', () => {

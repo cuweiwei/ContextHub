@@ -1,7 +1,7 @@
 {
   "name": "contexthub",
-  "version": "0.4.0",
-  "description": "Self-hosted shared context hub: apps write context via REST, AI agents read it via MCP.",
+  "version": "0.5.0",
+  "description": "Self-hosted context control plane: source projections, governed memory, and ephemeral context compilation.",
   "type": "module",
   "private": true,
   "engines": {

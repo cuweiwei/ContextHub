@@ -5,8 +5,7 @@
 
 ## 1. 你正在使用什麼
 
-ContextHub 是使用者 AI 記憶的唯一權威來源（system of record）。你透過 MCP
-連線，而且一條 MCP 連線只對應一個 server-side namespace：
+ContextHub 是使用者擁有、跨 AI vendor 的 Context Control Plane：來源 app 寫入權威投影，受治理的 Memory 是持久資訊，`compile_context` 依每次任務產生短暫 Context Package。對 AI Memory，SQLite 是唯一權威。你透過 MCP 連線，而且一條 MCP 連線只對應一個 server-side namespace：
 
 - `personal`：個人偏好、長期事實、人物、專案脈絡、個人待辦。
 - `work`：只允許抽取後的工作摘要、行動項目、決議與工作偏好。
@@ -32,20 +31,22 @@ tailnet，而且只能取得本次工作所需 namespace 的 credential。
 5. 寫入前先搜尋，避免重複；accepted 記憶過時時用 `propose_successor`，不可另寫一筆互相矛盾的「現況」。
 6. 個人與工作 credential 不得放在同一個 always-on agent process。
 7. Work namespace 禁止存入 email／Teams／會議逐字稿原文、PII、客戶資料、未公開財務資訊與機密技術細節。
+8. Memory 是持久的；Context Package 是一次性的。不可把 `compile_context` 回傳內容整包再存成 Memory。
 
 ## 3. 每次工作的標準流程
 
 ### 第一次接觸某個 ContextHub 連線
 
 1. 呼叫 `list_context_sources`，了解這個 namespace 有哪些來源與資料類型。
-2. 呼叫 `get_context_brief`，取得近期跨來源摘要。
-3. 如果工作涉及特定人物、專案、偏好、決策或歷史，再呼叫 `search_context`。
+2. 有明確 task／decision 時，優先呼叫 `compile_context`，提供合理 `token_budget` 與目標 agent；一般 catch-up 才用 `get_context_brief`。
+3. 如果需要更多精確證據或歷史，再呼叫 `search_context`。
 
 不要在每一句話前重複讀取。一次工作先讀 brief，遇到需要精確證據的主題再搜尋即可。
 
 ### 回答或規劃前
 
 - 「現在最重要的是什麼」：`get_current_context`
+- 「針對這次任務，在有限 context window 下應看到什麼」：`compile_context`
 - 「最近發生什麼」：`get_recent_context`
 - 「搜尋某個人物／專案／偏好」：`search_context`
 - 「需要完整內容」：先從搜尋結果取得 id，再用 `get_context_item`
@@ -79,13 +80,16 @@ tailnet，而且只能取得本次工作所需 namespace 的 credential。
 2. 若沒有等價項目，呼叫 `save_memory`。
 3. 一個 item 只表達一個可獨立審核的事實、偏好、決策或任務。
 4. 使用簡短 title、完整但精煉的 content，以及可搜尋的 tags／entities。
-5. 使用 `my_candidates` 確認寫入結果與待審狀態。
+5. 選擇 `memory_kind`：fact／preference／decision／experience／procedure／relationship／working_state；來源 app 的一般 projection 應省略。
+6. 時效資訊應填 `valid_from`／`valid_until`；只有明確重新核對時才填 `last_verified_at`。`decay_policy` 影響 ranking，不等於刪除。
+7. 使用 `my_candidates` 確認寫入結果與待審狀態。
 
 建議欄位：
 
 ```json
 {
   "type": "preference",
+  "memory_kind": "preference",
   "title": "網路變更前先做唯讀檢查",
   "content": "使用者偏好先區分公網 IP 與 NAS LAN IP，未經明確授權不得套用、重開機或拔線。",
   "tags": ["network", "nas", "change-safety"],
@@ -95,6 +99,8 @@ tailnet，而且只能取得本次工作所需 namespace 的 credential。
   "idempotency_key": "<fresh UUID>"
 }
 ```
+
+如果 `compile_context` 的內容確實改變了計畫或 action，可在 task 結束後呼叫 `record_context_outcome`，只傳 package id、實際使用的 item ids、`action_changed` 與 coarse outcome。不要附 prompt、回答、tool output 或敏感內容。
 
 `source_item_id` 是來源內的穩定識別，用來避免尚未審核的同一記憶重複建立；它不是
 `idempotency_key`。後者代表一次邏輯 mutation。
@@ -404,7 +410,7 @@ items；`/review` 顯示同 namespace 的 candidate inbox。
 
 Agent 的 ContextHub 連線整合只有在以下條件全部成立時才算完成：
 
-- 能呼叫 `list_context_sources` 與 `get_context_brief`。
+- 能呼叫 `list_context_sources`、`get_context_brief` 與 `compile_context`。
 - 搜尋結果只包含 credential 所屬 namespace 可讀內容。
 - 新記憶以 candidate 寫入，而且 exact retry 不會重複建立。
 - 使用者能在 `/review` 審核。

@@ -3,7 +3,7 @@
 ContextHub is a remote MCP server used by Codex; Codex project guidance and ContextHub memory are separate:
 
 - `AGENTS.md` tells Codex how to work in this repository.
-- ContextHub MCP tools provide live, durable memory for a single namespace.
+- ContextHub MCP tools provide source projections, governed durable memory, and ephemeral task-specific context for a single namespace.
 
 ## Network endpoint
 
@@ -35,7 +35,7 @@ read-only until post-migration verification succeeds.
 
 ## Create one Codex identity per namespace
 
-Run these on the NAS after the v4 container is deployed:
+Run these on the NAS after the v5 container is deployed:
 
 ```bash
 docker exec contexthub node dist/cli.js create-client \
@@ -84,11 +84,12 @@ On macOS, a GUI Codex process must inherit the environment variable. Load it fro
 
 After restarting Codex:
 
-1. Confirm the server initializes and exposes 16 tools.
+1. Confirm the server initializes and exposes 18 tools.
 2. Call `list_context_sources`.
-3. Call `get_context_brief`.
-4. Save one harmless test memory with a fresh UUID and confirm it appears in `my_candidates`.
-5. Retry the exact write with the same UUID and confirm it replays rather than duplicates.
-6. Confirm a work connection cannot see a known personal item and vice versa.
+3. Call `compile_context` with a harmless task and confirm the package is accepted-only, namespace-bound, and under budget.
+4. Call `get_context_brief`.
+5. Save one harmless typed test memory with a fresh UUID and confirm it appears in `my_candidates`.
+6. Retry the exact write with the same UUID and confirm it replays rather than duplicates.
+7. Confirm a work connection cannot see a known personal item and vice versa.
 
 Only `accepted` memories are shared facts. A candidate written during the smoke test should be rejected or removed through the normal review workflow when finished.

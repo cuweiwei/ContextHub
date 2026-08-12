@@ -1,25 +1,49 @@
 # ContextHub
 
-部署在私人 NAS 的**跨 AI 記憶權威平台**(system of record):Codex、Claude Code、個人/工作 Hermes 的唯一記憶來源。**Apps 透過 REST 寫入投影,AI agents 透過 MCP 讀寫記憶**;個人與工作記憶以 namespace 嚴格隔離,agent 寫入經信任升格(candidate→accepted)才成為共享事實,所有讀寫留稽核、所有版本與衝突裁決可追溯。
+部署在私人 NAS 的**跨 AI Context Control Plane**：連接來源 app 的權威投影、管理可長期重用且受治理的 Memory，並依每次任務動態編譯短暫的 Context Package。Codex、Claude Code、個人／工作 Hermes 共用同一套使用者所擁有的 context domain，不綁定單一 AI 廠商。
+
+**Memory 是持久資訊；Context 是某次推論看到的短暫組合。** 對 AI Memory，SQLite 是唯一權威；對 Gmail／Drive／GitHub／Calendar 等 app 資料，ContextHub 只保存 AI 決策所需的投影與 `source_uri`，原始資料仍留在來源系統。個人與工作 namespace 嚴格隔離，agent 記憶經 `candidate → accepted` 才能進共享讀取面，所有讀寫、版本與衝突裁決都可追溯。
 
 一般使用者的查看、審核與記憶遷移說明見
 [docs/USER-GUIDE.md](docs/USER-GUIDE.md)；可直接交給 AI agent 的操作與既有記憶
 遷移說明見 [docs/AGENT-GUIDE.md](docs/AGENT-GUIDE.md)。完整設計見
 [docs/DESIGN.md](docs/DESIGN.md);信任邊界與資料治理見
-[docs/ADR-001](docs/ADR-001-trust-boundary.md)。
+[docs/ADR-001](docs/ADR-001-trust-boundary.md)；Context／Memory 分層決策見
+[docs/ADR-002](docs/ADR-002-context-memory-separation.md)。
 
+```mermaid
+flowchart TB
+  subgraph World["Persistent world"]
+    SS["Authoritative source systems<br/>Gmail · Drive · GitHub · Calendar · NAS"]
+    SP["Source projections<br/>source_uri 回連原始權威"]
+    MEM["Memory<br/>fact · preference · decision · experience<br/>procedure · relationship · working_state"]
+    STATE["Task state<br/>exact-key · schema validated"]
+    SS -->|"REST projection"| SP
+  end
+
+  POLICY["Policy & governance<br/>namespace · authority · provenance · ACL<br/>sensitivity · trust · audit · conflict"]
+  CC["Context Compiler<br/>intent · retrieval · authority/freshness ranking<br/>validity · dedup · token budget · target formatting"]
+  PKG["Ephemeral Context Package<br/>not stored as memory"]
+  AGENTS["AI agents<br/>ChatGPT · Claude · Codex · Cursor · Hermes"]
+  ACTION["Action"]
+  OUTCOME["Outcome feedback<br/>ids + coarse labels only"]
+  FORM["Memory formation<br/>observe · extract · classify · score · propose<br/>review · consolidate · update · supersede/forget"]
+
+  SP --> CC
+  MEM --> CC
+  STATE --> CC
+  POLICY --> CC
+  POLICY --> FORM
+  CC --> PKG --> AGENTS --> ACTION --> OUTCOME --> FORM --> MEM
 ```
-Apps/agents ──REST──▶  ContextHub(NAS, Docker)  ◀──MCP── Codex / Claude Code / Hermes
-                       SQLite(唯一權威)+ FTS5(中文全文搜尋,可重建)
-                       namespace 隔離 ‧ 政策 allowlist ‧ 稽核 fail-closed
-                       authority × trust_state × lifecycle ‧ 版本/裁決 append-only
-```
+
+Agent runtime 仍負責 system/user instructions 與即時 tool output 的最後 prompt 組裝；ContextHub 的 `compile_context` 專注於持久來源、Memory 與明確授權的 operational state，不保存 task text 或編譯結果。
 
 ## 本機開發
 
 ```bash
 nvm use
-npm install
+npm ci
 npm test          # tsc typecheck + vitest(隔離/信任/政策/稽核/一致性/還原邊界)
 npm run dev       # http://localhost:8787
 npm run e2e       # 真實 HTTP 端對端:REST↔MCP 一致性 → 備份 → 還原 → reindex → 驗證
@@ -99,9 +123,11 @@ claude mcp add --transport http contexthub-work http://<nas-tailscale-ip>:8788/m
 Codex 的安全設定、personal/work credential 隔離與 smoke test 見
 [docs/CODEX.md](docs/CODEX.md)。
 
-16 個工具。讀取面:`search_context`(中文 OK、多查詢合併、結果帶 authority/trust_state)、`get_current_context`、`get_recent_context`、`get_context_item`、`get_context_brief`、`list_context_sources`、`get_memory_history`(版本+裁決史)、`my_candidates`(自己的待審)。
+18 個工具。讀取面：`compile_context`（依 intent、有效期、authority/freshness、ACL 與 token budget 產生短暫 package）、`search_context`（中文、多查詢合併、結果帶 information_class/memory_kind/authority/trust_state）、`get_current_context`、`get_recent_context`、`get_context_item`、`get_context_brief`、`list_context_sources`、`get_memory_history`（版本＋裁決史）、`my_candidates`（自己的待審）。
 
-記憶生命週期:`save_memory`(存偏好/事實/專案脈絡;政策決定 candidate/accepted)、`propose_insight`(推論+evidence)、`revise_my_candidate`、`propose_successor`(取代過時的 accepted 記憶,裁決原子寫回)、`operate_task`(型別化任務操作,碰不到語意欄位)、`curate_note`、`update_operational_state`/`get_operational_state`(exact-key 狀態槽)。
+記憶與回饋生命週期：`save_memory`（可標記 fact／preference／decision／experience／procedure／relationship／working_state）、`propose_insight`（推論＋evidence）、`revise_my_candidate`、`propose_successor`（取代過時的 accepted Memory，裁決原子寫回）、`record_context_outcome`（只記 context 是否改變行動及粗粒度結果）、`operate_task`、`curate_note`、`update_operational_state`／`get_operational_state`（exact-key 狀態槽）。
+
+`context_items.information_class` 由 server 決定為 `source / memory / task_state`；`memory_kind`、`valid_from / valid_until`、`last_verified_at`、`decay_policy` 描述 Memory 的語意與生命週期。`valid_until`／`expires_at` 已過或尚未到 `valid_from` 的項目，不進任何 list/search/compiler 讀取面。
 
 所有 mutation 必帶 `idempotency_key`(UUID)——timeout 重試安全,同 key 回原結果。
 
@@ -134,13 +160,13 @@ Human reviewer 可從 Tailscale 私網開啟 `http://<NAS_TAILSCALE_IP>:8788/rev
 
 ```
 src/
-  core/    # 單點強制層:commands(mutation+稽核+idempotency)、items-repo(applyFilters:
-           #   namespace+trust+ACL)、policy/policies-repo(PolicyV1 版本化)、audit-repo、
+  core/    # 單點強制層:commands(mutation+稽核+idempotency)、context-compiler(短暫 package)、
+           #   items-repo(applyFilters:namespace+trust+ACL+validity)、policy/policies-repo、audit-repo、
            #   clients-repo(immutable identity)、canonical、cjk、errors
   http/    # Fastify:auth + /v1 routes(items/candidates/review/task-op/curate/state/
            #   history/audit/policies/clients/namespaces)+ /explore + /review + health
-  mcp/     # MCP server(16 tools)+ Streamable HTTP 掛載(stateless,一 key 一 namespace)
-  db/      # SQLite 連線(synchronous=FULL、instance lock)+ 內嵌 migrations(v1–v5)
+  mcp/     # MCP server(18 tools)+ Streamable HTTP 掛載(stateless,一 key 一 namespace)
+  db/      # SQLite 連線(synchronous=FULL、instance lock)+ 內嵌 migrations(v1–v6)
   cli.ts   # create-client/rotate-key/policy-*/review/candidates/audit/reindex/backup/purge/...
 scripts/   # e2e.sh(REST↔MCP 一致性+備份還原全流程)、restore.sh(NAS runbook)
 test/      # 100+ tests:隔離/信任/政策/稽核 fail-closed/idempotency/一致性/還原邊界

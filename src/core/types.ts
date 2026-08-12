@@ -43,6 +43,32 @@ export const STATE_KINDS = ['semantic', 'operational'] as const;
 export type StateKind = (typeof STATE_KINDS)[number];
 
 /**
+ * Persistent information is classified independently from provenance and
+ * trust. Source projections point back to an authoritative app; memories are
+ * reusable knowledge formed from interactions/evidence; task_state is an
+ * exact-key operational slot. A compiled context is deliberately NOT a row in
+ * this table — it is an ephemeral read result.
+ */
+export const INFORMATION_CLASSES = ['source', 'memory', 'task_state'] as const;
+export type InformationClass = (typeof INFORMATION_CLASSES)[number];
+
+/** Memory semantics have different validity and decay expectations. */
+export const MEMORY_KINDS = [
+  'fact',
+  'preference',
+  'decision',
+  'experience',
+  'procedure',
+  'relationship',
+  'working_state',
+] as const;
+export type MemoryKind = (typeof MEMORY_KINDS)[number];
+
+/** Ranking policy for information that has no explicit valid_until. */
+export const DECAY_POLICIES = ['none', 'standard', 'rapid'] as const;
+export type DecayPolicy = (typeof DECAY_POLICIES)[number];
+
+/**
  * Item types are conventions, not an enum — writers may introduce their own,
  * subject to the namespace policy's create_rules. Documented conventions:
  * event, fact, state, transaction, note, task, contact, preference, insight,
@@ -60,6 +86,14 @@ export const newItemSchema = z.object({
   confidence: z.number().min(0).max(1).optional(),
   occurred_at: isoDateTime.optional(),
   expires_at: isoDateTime.optional(),
+  memory_kind: z
+    .enum(MEMORY_KINDS)
+    .optional()
+    .describe('Reusable memory semantics; omit for a source projection'),
+  valid_from: isoDateTime.optional(),
+  valid_until: isoDateTime.optional(),
+  last_verified_at: isoDateTime.optional(),
+  decay_policy: z.enum(DECAY_POLICIES).optional(),
   /**
    * Evidence for insights: ids of the NON-insight context items this
    * inference is based on. Must live in the writer's namespace.
@@ -100,6 +134,10 @@ export const patchItemSchema = z
     confidence: z.number().min(0).max(1).nullable(),
     occurred_at: isoDateTime.nullable(),
     expires_at: isoDateTime.nullable(),
+    valid_from: isoDateTime.nullable(),
+    valid_until: isoDateTime.nullable(),
+    last_verified_at: isoDateTime.nullable(),
+    decay_policy: z.enum(DECAY_POLICIES).nullable(),
     source_uri: z.string().max(1000).nullable(),
     expected_revision: z.number().int().min(1),
   })
@@ -125,11 +163,17 @@ export interface ContextItem {
   accepted_at: string | null;
   acceptance_policy_version: number | null;
   acceptance_rule_id: string | null;
+  information_class: InformationClass;
+  memory_kind: MemoryKind | null;
   confidence: number | null;
   occurred_at: string | null;
   created_at: string;
   updated_at: string;
   expires_at: string | null;
+  valid_from: string | null;
+  valid_until: string | null;
+  last_verified_at: string | null;
+  decay_policy: DecayPolicy | null;
   source_item_id: string | null;
   source_uri: string | null;
   revision: number;
@@ -155,6 +199,8 @@ export interface CompactItem {
   authority: Authority;
   status: ItemStatus;
   trust_state: TrustState;
+  information_class: InformationClass;
+  memory_kind: MemoryKind | null;
   confidence: number | null;
   occurred_at: string | null;
   created_at: string;

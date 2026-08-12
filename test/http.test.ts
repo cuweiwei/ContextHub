@@ -65,7 +65,7 @@ describe('REST API', () => {
     expect(res.headers['content-type']).toContain('text/html');
     expect(res.headers['cache-control']).toBe('no-store');
     expect(res.headers['content-security-policy']).toContain("default-src 'none'");
-    expect(res.body).toContain('ContextHub · Memory explorer');
+    expect(res.body).toContain('ContextHub · Context explorer');
     expect(res.body).toContain('/v1/sources');
     expect(res.body).toContain('/v1/items?');
     expect(res.body).not.toContain('ADMIN_TOKEN=');
@@ -153,6 +153,65 @@ describe('REST API', () => {
     const byId = await app.inject({ method: 'GET', url: `/v1/items/${itemId}`, headers: auth });
     expect(byId.statusCode).toBe(200);
     expect(byId.json().item.title).toContain('財務規劃');
+  });
+
+  it('compiles ephemeral context over REST and stores only coarse outcome feedback', async () => {
+    const producerKey = await createClient('planning-app', 'service', ['read', 'write']);
+    const producer = { authorization: `Bearer ${producerKey}` };
+    const source = await app.inject({
+      method: 'POST',
+      url: '/v1/items',
+      headers: producer,
+      payload: payloadWithKey({ type: 'state', title: '專案發布剩三天', content: '目前仍有兩個阻塞項目' }),
+    });
+    const memory = await app.inject({
+      method: 'POST',
+      url: '/v1/items',
+      headers: producer,
+      payload: payloadWithKey({
+        type: 'memory',
+        memory_kind: 'procedure',
+        title: '發布前必須確認回滾路徑',
+        content: '先完成還原演練，再核准正式發布。',
+      }),
+    });
+    expect(source.json().item.information_class).toBe('source');
+    expect(memory.json().item.information_class).toBe('memory');
+
+    const agentKey = await createClient('planner', 'agent', ['read', 'write']);
+    const agent = { authorization: `Bearer ${agentKey}` };
+    const compiled = await app.inject({
+      method: 'POST',
+      url: '/v1/context/compile',
+      headers: agent,
+      payload: { intent: '規劃專案發布與回滾', target_agent: 'anthropic', token_budget: 1200 },
+    });
+    expect(compiled.statusCode).toBe(200);
+    expect(compiled.json().sections.sources).toHaveLength(1);
+    expect(compiled.json().sections.memories).toHaveLength(1);
+    expect(compiled.json().rendered_context).toContain('<context_package');
+
+    const ids = [source.json().item.id, memory.json().item.id];
+    const outcome = await app.inject({
+      method: 'POST',
+      url: '/v1/context/outcomes',
+      headers: agent,
+      payload: {
+        package_id: compiled.json().package_id,
+        item_ids: ids,
+        outcome: 'helpful',
+        action_changed: true,
+        idempotency_key: randomUUID(),
+      },
+    });
+    expect(outcome.statusCode).toBe(201);
+    const stored = env.db.prepare('SELECT package_id, outcome, action_changed FROM context_outcomes').get() as any;
+    expect(stored).toMatchObject({ package_id: compiled.json().package_id, outcome: 'helpful', action_changed: 1 });
+
+    const audit = env.db
+      .prepare("SELECT details FROM audit_log WHERE action = 'read.compile_context' ORDER BY id DESC LIMIT 1")
+      .get() as { details: string };
+    expect(audit.details).not.toContain('規劃專案發布與回滾');
   });
 
   it('rejects creates without an idempotency_key', async () => {

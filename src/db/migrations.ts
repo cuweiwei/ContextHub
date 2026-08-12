@@ -349,6 +349,87 @@ const MIGRATIONS: {
       }
     },
   },
+  {
+    version: 6,
+    name: 'context-memory-separation-compiler-feedback',
+    sql: `
+      -- Persistent information layers. Compiled context packages are
+      -- intentionally ephemeral and therefore never stored in context_items.
+      ALTER TABLE context_items ADD COLUMN information_class TEXT NOT NULL DEFAULT 'source'
+        CHECK (information_class IN ('source','memory','task_state'));
+      ALTER TABLE context_items ADD COLUMN memory_kind TEXT
+        CHECK (memory_kind IN ('fact','preference','decision','experience','procedure','relationship','working_state'));
+      ALTER TABLE context_items ADD COLUMN valid_from TEXT;
+      ALTER TABLE context_items ADD COLUMN valid_until TEXT;
+      ALTER TABLE context_items ADD COLUMN last_verified_at TEXT;
+      ALTER TABLE context_items ADD COLUMN decay_policy TEXT
+        CHECK (decay_policy IN ('none','standard','rapid'));
+
+      -- Conservative classification of legacy rows. App projections remain
+      -- source unless they were explicit insights; user/agent assertions are
+      -- memories. Operational exact-key slots are task state.
+      UPDATE context_items SET information_class = CASE
+        WHEN state_kind = 'operational' THEN 'task_state'
+        WHEN authority IN ('user','agent') OR type = 'insight' THEN 'memory'
+        ELSE 'source'
+      END;
+      UPDATE context_items SET memory_kind = CASE type
+        WHEN 'fact' THEN 'fact'
+        WHEN 'preference' THEN 'preference'
+        WHEN 'decision' THEN 'decision'
+        WHEN 'experience' THEN 'experience'
+        WHEN 'procedure' THEN 'procedure'
+        WHEN 'contact' THEN 'relationship'
+        WHEN 'relationship' THEN 'relationship'
+        WHEN 'task' THEN 'working_state'
+        WHEN 'state' THEN 'working_state'
+        WHEN 'working_state' THEN 'working_state'
+        ELSE NULL
+      END WHERE information_class = 'memory';
+      UPDATE context_items SET decay_policy = CASE memory_kind
+        WHEN 'fact' THEN 'none'
+        WHEN 'preference' THEN 'none'
+        WHEN 'decision' THEN 'none'
+        WHEN 'procedure' THEN 'none'
+        WHEN 'relationship' THEN 'none'
+        WHEN 'working_state' THEN 'rapid'
+        WHEN 'experience' THEN 'standard'
+        ELSE NULL
+      END WHERE information_class = 'memory';
+      CREATE INDEX idx_items_information_class ON context_items(namespace, information_class, memory_kind);
+      CREATE INDEX idx_items_validity ON context_items(namespace, valid_from, valid_until);
+
+      -- Outcome feedback closes the context -> action -> memory lifecycle
+      -- without persisting prompts or compiled package contents. It records
+      -- only ids and coarse effectiveness signals.
+      CREATE TABLE context_outcomes (
+        id TEXT PRIMARY KEY,
+        package_id TEXT NOT NULL,
+        namespace TEXT NOT NULL REFERENCES namespaces(id),
+        client_id TEXT NOT NULL,
+        outcome TEXT NOT NULL CHECK (outcome IN ('helpful','mixed','harmful','unknown')),
+        action_changed INTEGER NOT NULL CHECK (action_changed IN (0,1)),
+        item_ids TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX idx_context_outcomes_ns ON context_outcomes(namespace, id);
+      CREATE INDEX idx_context_outcomes_package ON context_outcomes(package_id);
+    `,
+    post: (db) => {
+      // Classification/validity metadata is domain state, so migration v6
+      // gets its own append-only version snapshot rather than silently
+      // changing the latest v5 revision in place.
+      const now = new Date().toISOString();
+      db.prepare('UPDATE context_items SET revision = revision + 1 WHERE 1 = 1').run();
+      const rows = db.prepare('SELECT * FROM context_items').all() as Record<string, unknown>[];
+      const insertVersion = db.prepare(
+        'INSERT INTO item_versions (item_id, revision, snapshot, change_kind, changed_by, changed_at) VALUES (?, ?, ?, ?, ?, ?)',
+      );
+      for (const row of rows) {
+        insertVersion.run(row.id, row.revision, JSON.stringify(row), 'migrate', 'migration-v6', now);
+      }
+    },
+  },
 ];
 
 export function migrate(db: Database.Database): void {

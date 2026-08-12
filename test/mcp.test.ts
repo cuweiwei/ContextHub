@@ -78,10 +78,11 @@ describe('MCP endpoint', () => {
 
   it('exposes the read surfaces and the memory lifecycle tools', async () => {
     const client = await connect(agentKey);
-    expect(client.getInstructions()).toContain('authoritative long-term memory for namespace "personal"');
+    expect(client.getInstructions()).toContain('context control plane for namespace "personal"');
     expect(client.getInstructions()).toContain('Treat only accepted items as shared facts');
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([
+      'compile_context',
       'curate_note',
       'get_context_brief',
       'get_context_item',
@@ -94,6 +95,7 @@ describe('MCP endpoint', () => {
       'operate_task',
       'propose_insight',
       'propose_successor',
+      'record_context_outcome',
       'revise_my_candidate',
       'save_memory',
       'search_context',
@@ -119,6 +121,51 @@ describe('MCP endpoint', () => {
       expect(item.status).toBe('active');
       expect(item.trust_state).toBe('accepted');
     }
+    await client.close();
+  });
+
+  it('compiles ephemeral source + memory context and records coarse outcome feedback', async () => {
+    const memory = env.seed(
+      'owner',
+      seedItem({
+        type: 'memory',
+        memory_kind: 'procedure',
+        title: '預算決策前先檢查剩餘天數',
+        content: '月底前先比較剩餘預算與剩餘天數，再決定是否調整支出。',
+      }),
+      { authority: 'user', principalKind: 'human' },
+    ).item;
+    const client = await connect(agentKey);
+    const compiled = payload(
+      await client.callTool({
+        name: 'compile_context',
+        arguments: { intent: '規劃本月餐飲預算', target_agent: 'openai', token_budget: 1200 },
+      }),
+    );
+    expect(compiled.package_id).toBeTruthy();
+    expect(compiled.constraints).toMatchObject({ accepted_only: true, active_only: true, namespace: 'personal' });
+    expect(compiled.sections.sources.map((item: any) => item.id)).toContain(budgetItemId);
+    expect(compiled.sections.memories.map((item: any) => item.id)).toContain(memory.id);
+    expect(compiled.rendered_context).toContain('Compiled context');
+    expect(compiled.estimated_tokens).toBeLessThanOrEqual(1200);
+
+    const feedback = payload(
+      await client.callTool({
+        name: 'record_context_outcome',
+        arguments: {
+          package_id: compiled.package_id,
+          item_ids: [budgetItemId, memory.id],
+          outcome: 'helpful',
+          action_changed: true,
+          idempotency_key: randomUUID(),
+        },
+      }),
+    );
+    expect(feedback.package_id).toBe(compiled.package_id);
+    const row = env.db.prepare('SELECT outcome, action_changed, item_ids FROM context_outcomes').get() as any;
+    expect(row.outcome).toBe('helpful');
+    expect(row.action_changed).toBe(1);
+    expect(JSON.parse(row.item_ids)).toEqual([budgetItemId, memory.id]);
     await client.close();
   });
 

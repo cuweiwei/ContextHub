@@ -5,8 +5,9 @@
 
 ## 1. ContextHub 能幫你做什麼
 
-ContextHub 把不同 AI 工具的長期記憶集中在同一個地方。例如，你在 Codex
-確認過的偏好，可以在 Claude Code 或其他已連線的 AI 工具中繼續使用。
+ContextHub 把不同 AI 工具需要的來源摘要與長期記憶放在同一個、由你控制的地方。例如，你在 Codex 確認過的偏好，可以在 Claude Code 或其他已連線的 AI 工具中繼續使用；每個 AI 也可以依眼前任務取得一份短暫、限量且權限過濾過的 Context，不必把所有資料一次塞給模型。
+
+長期 Memory 與短暫 Context 不一樣：Memory 是值得跨對話保留的資訊；Context 是某次任務實際提供給 AI 的組合，任務結束後不會被整包另存成記憶。
 
 它不是完整對話備份，也不會自動相信 AI 寫入的每一句話：
 
@@ -33,7 +34,7 @@ http://<NAS_TAILSCALE_IP>:8788
 
 | 用途 | 網址 |
 |---|---|
-| 查看正式記憶 | `http://<NAS_TAILSCALE_IP>:8788/explore` |
+| 查看正式 Source／Memory | `http://<NAS_TAILSCALE_IP>:8788/explore` |
 | 審核 AI 提案 | `http://<NAS_TAILSCALE_IP>:8788/review` |
 | 確認服務正常 | `http://<NAS_TAILSCALE_IP>:8788/health` |
 
@@ -43,12 +44,12 @@ Reviewer key 相當於密碼。請保存在密碼管理器或系統鑰匙圈，�
 
 ## 3. 最常用的三個操作
 
-### 查看目前有哪些記憶
+### 查看目前有哪些 Source 與 Memory
 
 1. 開啟 `/explore`。
 2. 貼上你的 reviewer key，按下解鎖。
 3. 使用搜尋、來源、類型或標籤篩選內容。
-4. 點選一筆記憶，查看完整內容、來源與建立時間。
+4. 點選一筆資料，查看它是 Source projection 或 Memory，以及完整內容、來源、類型、有效期與建立時間。
 
 `/explore` 只顯示已接受的正式記憶。剛由 AI 提交、尚未審核的內容不會出現在這裡。
 

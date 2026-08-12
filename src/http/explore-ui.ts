@@ -164,9 +164,9 @@ const EXPLORE_HTML = String.raw`<!doctype html>
   <main class="shell">
     <header>
       <div>
-        <div class="eyebrow">ContextHub · Memory explorer</div>
-        <h1>記憶總覽</h1>
-        <p class="lede">查看目前已接受的共享記憶、來源分布與內容明細。所有數字與項目都受這把 key 的 namespace、來源與敏感度權限限制。</p>
+        <div class="eyebrow">ContextHub · Context explorer</div>
+        <h1>持久資訊總覽</h1>
+        <p class="lede">查看目前已接受的 Source projection 與 Memory、來源分布及內容明細。短暫 Context Package 不會儲存在這裡；所有數字與項目都受這把 key 的 namespace、來源與敏感度權限限制。</p>
       </div>
       <div class="top-actions">
         <a class="nav-link" href="/review">前往 Candidate 審核台</a>
@@ -177,7 +177,7 @@ const EXPLORE_HTML = String.raw`<!doctype html>
     <section class="auth">
       <input id="token" type="password" autocomplete="off" spellcheck="false"
         placeholder="貼上具有 read 權限的 client key（建議使用 human reviewer key）">
-      <button id="connect" class="btn">載入記憶總覽</button>
+      <button id="connect" class="btn">載入持久資訊</button>
       <div id="auth-status" class="status">不使用 ADMIN_TOKEN；關閉或重新整理頁面後 key 即消失。</div>
     </section>
 
@@ -185,7 +185,7 @@ const EXPLORE_HTML = String.raw`<!doctype html>
       <div class="stats">
         <div class="stat"><span>可讀取的 Accepted items</span><strong id="stat-items">0</strong></div>
         <div class="stat"><span>有內容的來源</span><strong id="stat-sources">0</strong></div>
-        <div class="stat"><span>記憶類型</span><strong id="stat-types">0</strong></div>
+        <div class="stat"><span>資料類型</span><strong id="stat-types">0</strong></div>
         <div class="stat"><span>目前列表</span><strong id="stat-visible">0</strong></div>
       </div>
 
@@ -208,7 +208,7 @@ const EXPLORE_HTML = String.raw`<!doctype html>
 
       <section class="panel browser">
         <div class="panel-head">
-          <h2>記憶瀏覽器</h2>
+          <h2>Source / Memory 瀏覽器</h2>
           <span id="result-note" class="count"></span>
         </div>
         <div class="filters">
@@ -227,7 +227,7 @@ const EXPLORE_HTML = String.raw`<!doctype html>
         <div class="content-layout">
           <div id="memories" class="memory-list"></div>
           <article>
-            <div id="empty" class="empty">從左側選一筆記憶查看完整內容。</div>
+            <div id="empty" class="empty">從左側選一筆持久資訊查看完整內容。</div>
             <div id="detail" class="detail hidden">
               <div id="badges" class="meta"></div>
               <h2 id="title"></h2>
@@ -329,7 +329,7 @@ const EXPLORE_HTML = String.raw`<!doctype html>
         const sourceWrap = byId("sources");
         sourceWrap.replaceChildren();
         if (!acceptedSources.length) {
-          sourceWrap.append(text("div", "這把 key 目前看不到任何 accepted 記憶。", "empty"));
+          sourceWrap.append(text("div", "這把 key 目前看不到任何 accepted Source／Memory。", "empty"));
         }
         for (const source of acceptedSources) {
           const card = text("div", "", "source");
@@ -389,13 +389,14 @@ const EXPLORE_HTML = String.raw`<!doctype html>
           selectedId = null;
           byId("empty").classList.remove("hidden");
           byId("detail").classList.add("hidden");
-          wrap.append(text("div", "沒有符合條件的 accepted 記憶。", "empty"));
+          wrap.append(text("div", "沒有符合條件的 accepted 持久資訊。", "empty"));
           return;
         }
         for (const item of items) {
           const button = document.createElement("button");
           button.type = "button";
           button.className = "memory" + (selectedId === item.id ? " active" : "");
+          button.append(chip(item.information_class || "source"));
           button.append(chip(item.type));
           if (item.sensitivity === "private") button.append(chip("private", "private"));
           button.append(text("div", item.title, "memory-title"));
@@ -425,7 +426,8 @@ const EXPLORE_HTML = String.raw`<!doctype html>
         byId("empty").classList.add("hidden");
         byId("detail").classList.remove("hidden");
         const badges = byId("badges");
-        badges.replaceChildren(chip(item.trust_state), chip(item.authority, "authority"), chip(item.type));
+        badges.replaceChildren(chip(item.trust_state), chip(item.authority, "authority"), chip(item.information_class || "source"), chip(item.type));
+        if (item.memory_kind) badges.append(chip(item.memory_kind));
         if (item.sensitivity === "private") badges.append(chip("private", "private"));
         byId("title").textContent = item.title;
         byId("subtitle").replaceChildren(
@@ -438,6 +440,12 @@ const EXPLORE_HTML = String.raw`<!doctype html>
         addFact("事件時間", formatTime(item.occurred_at));
         addFact("更新時間", formatTime(item.updated_at));
         addFact("生命週期", item.status);
+        addFact("資訊角色", item.information_class);
+        addFact("Memory 類型", item.memory_kind);
+        addFact("有效起點", formatTime(item.valid_from));
+        addFact("有效終點", formatTime(item.valid_until));
+        addFact("最後驗證", formatTime(item.last_verified_at));
+        addFact("衰減策略", item.decay_policy);
         addFact("接受方式", item.acceptance_method);
         addFact("接受者", item.accepted_by);
         byId("content").textContent = item.content || "（無內容）";
@@ -480,14 +488,14 @@ const EXPLORE_HTML = String.raw`<!doctype html>
           setStatus("請輸入有效的 client key。", true);
           return;
         }
-        setStatus("正在讀取 namespace 內的 accepted 記憶…", false);
+        setStatus("正在讀取 namespace 內的 accepted Source／Memory…", false);
         try {
           const sourceResponse = await api("/v1/sources");
           sources = sourceResponse.sources || [];
           renderOverview();
           await loadItems();
           workspace.classList.remove("hidden");
-          setStatus("已連線；畫面只顯示這把 key 經 server-side policy 授權可讀的 accepted 記憶。", false);
+          setStatus("已連線；畫面只顯示這把 key 經 server-side policy 授權可讀的 accepted Source／Memory。", false);
         } catch (error) {
           token = "";
           workspace.classList.add("hidden");

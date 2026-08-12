@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end verification for ContextHub v4.
+# End-to-end verification for ContextHub v5.
 # Builds, seeds demo data, mints namespace-bound keys, boots the server,
 # exercises REST + MCP over real HTTP (including cross-interface
 # read-after-write and namespace isolation), then backs up, restores to a
@@ -65,7 +65,7 @@ MCP_HDRS=(-H "$AUTH" -H "Content-Type: application/json" -H "Accept: application
 INIT=$(curl -s "${MCP_HDRS[@]}" http://127.0.0.1:$PORT/mcp -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}')
 check "MCP initialize" '"name":"contexthub"' "$INIT"
 TOOLS=$(curl -s "${MCP_HDRS[@]}" http://127.0.0.1:$PORT/mcp -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}')
-for t in search_context get_current_context get_recent_context get_context_item propose_insight list_context_sources get_context_brief save_memory my_candidates propose_successor operate_task get_memory_history; do
+for t in compile_context search_context get_current_context get_recent_context get_context_item propose_insight list_context_sources get_context_brief save_memory my_candidates propose_successor operate_task get_memory_history record_context_outcome; do
   check "tool $t registered" "$t" "$TOOLS"
 done
 
@@ -86,6 +86,16 @@ SAVE=$(curl -s "${MCP_HDRS[@]}" http://127.0.0.1:$PORT/mcp -d "{\"jsonrpc\":\"2.
 check "save_memory candidate" '\"trust_state\":\"candidate\"' "$SAVE"
 STORE=$(curl -s "${MCP_HDRS[@]}" http://127.0.0.1:$PORT/mcp -d "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"propose_insight\",\"arguments\":{\"type\":\"insight\",\"title\":\"E2E 洞察測試\",\"content\":\"使用者偏好早上專注工作\",\"tags\":[\"e2e\"],\"confidence\":0.8,\"idempotency_key\":\"$(uuid)\"}}}")
 check "propose_insight writes" '\"created\":true' "$STORE"
+
+COMPILED=$(curl -s -H "$AUTH" -H "Content-Type: application/json" http://127.0.0.1:$PORT/v1/context/compile \
+  -d '{"intent":"規劃目前財務預算","target_agent":"openai","token_budget":1200}')
+check "context compiler returns an ephemeral package" '"accepted_only":true' "$COMPILED"
+check "compiled context includes an accepted source projection" '財務規劃' "$COMPILED"
+PACKAGE_ID=$(node -e 'console.log(JSON.parse(process.argv[1]).package_id)' "$COMPILED")
+CONTEXT_ITEM_ID=$(node -e 'const p=JSON.parse(process.argv[1]); console.log(p.sections.sources[0].id)' "$COMPILED")
+OUTCOME=$(curl -s -H "$AUTH" -H "Content-Type: application/json" http://127.0.0.1:$PORT/v1/context/outcomes \
+  -d "{\"package_id\":\"$PACKAGE_ID\",\"item_ids\":[\"$CONTEXT_ITEM_ID\"],\"outcome\":\"helpful\",\"action_changed\":true,\"idempotency_key\":\"$(uuid)\"}")
+check "context outcome stores coarse feedback" '"package_id"' "$OUTCOME"
 # work agent must not see any of it
 WORK_PROBE=$(curl -s -H "$WAUTH" "http://127.0.0.1:$PORT/v1/items?q=E2E")
 check_not "work agent cannot search personal data" 'E2E' "$WORK_PROBE"
@@ -99,6 +109,8 @@ mkdir -p "$RESTORE_DATA"
 cp "$SNAPSHOT" "$RESTORE_DATA/contexthub.db"
 export DATA_DIR="$RESTORE_DATA"
 npm run cli -- reindex   # MANDATORY after restore (FTS rowids are not trusted)
+RESTORED_OUTCOMES=$(node -e 'const Database=require("better-sqlite3"); const db=new Database(process.env.DATA_DIR+"/contexthub.db",{readonly:true}); console.log(db.prepare("SELECT COUNT(*) AS n FROM context_outcomes").get().n); db.close()')
+check "restored hub keeps context outcome feedback" '1' "$RESTORED_OUTCOMES"
 node dist/index.js >/tmp/contexthub-e2e-restore.log 2>&1 &
 SERVER_PID=$!
 trap 'kill $SERVER_PID 2>/dev/null' EXIT

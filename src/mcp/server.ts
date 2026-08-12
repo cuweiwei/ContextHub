@@ -11,7 +11,14 @@ import {
   SourceItemConflictError,
   ValidationError,
 } from '../core/errors.js';
-import { newItemSchema, STATUSES, type ClientAuth } from '../core/types.js';
+import {
+  DECAY_POLICIES,
+  MEMORY_KINDS,
+  newItemSchema,
+  STATUSES,
+  type ClientAuth,
+} from '../core/types.js';
+import { CONTEXT_TARGETS } from '../core/context-compiler.js';
 import { sourcesView } from '../http/routes/sources.js';
 
 export type McpDeps = Pick<AppDeps, 'commands' | 'clientsRepo'>;
@@ -66,11 +73,11 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
       ? ' In work, save only extracted summaries, tasks, decisions, and work preferences; never store raw email, chat, meeting transcripts, PII, customer data, undisclosed financials, or confidential technical details.'
       : '';
   const server = new McpServer(
-    { name: 'contexthub', version: '0.4.0' },
+    { name: 'contexthub', version: '0.5.0' },
     {
       instructions:
-        `ContextHub is the authoritative long-term memory for namespace "${client.namespace}". ` +
-        'Before user-specific planning, call get_context_brief once or use search_context. ' +
+        `ContextHub is the context control plane for namespace "${client.namespace}": source projections and durable memory remain persistent; compiled context is ephemeral. ` +
+        'Before user-specific planning, call compile_context for a task-specific package, get_context_brief, or search_context. ' +
         'Treat only accepted items as shared facts; candidates are unreviewed proposals. ' +
         'Do not save transient conversation details. Every mutation needs a fresh UUID idempotency_key; ' +
         `reuse a key only when retrying the same logical operation.${workGovernance}`,
@@ -309,6 +316,43 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
     }),
   );
 
+  server.registerTool(
+    'compile_context',
+    {
+      title: 'Compile task-specific context',
+      description:
+        'Build an EPHEMERAL, token-budgeted context package for one task from accepted source projections, durable memories, and explicitly authorized operational state. The package is filtered by namespace, ACL, sensitivity, validity, lifecycle, relevance, freshness, authority, and deduplication. It is not stored as memory. Use the returned rendered_context as model input and package_id for optional outcome feedback.',
+      inputSchema: {
+        intent: z.string().min(1).max(10_000).describe('The task or decision this context must support'),
+        queries: z.array(z.string().min(1).max(1000)).max(5).optional(),
+        target_agent: z.enum(CONTEXT_TARGETS).default('generic'),
+        token_budget: z.number().int().min(256).max(32_000).default(4000),
+        sources: z.array(z.string()).max(50).optional(),
+        types: z.array(z.string()).max(50).optional(),
+        tags: z.array(z.string()).max(50).optional(),
+        state_keys: z
+          .array(z.string().min(1).max(200))
+          .max(20)
+          .optional()
+          .describe('Exact operational state keys; each still requires a matching state read rule'),
+        include_private: z.boolean().default(false),
+      },
+    },
+    guarded((args: any) => {
+      if (!canRead) throw new PolicyDeniedError('this API key lacks the "read" scope');
+      const { sensitivity, note } = resolveSensitivity(args.include_private);
+      const contextPackage = commands.compileContext(client, {
+        intent: args.intent,
+        queries: args.queries,
+        target: args.target_agent,
+        tokenBudget: args.token_budget,
+        filters: { sources: args.sources, types: args.types, tags: args.tags, sensitivity },
+        stateKeys: args.state_keys,
+      });
+      return note ? { note, ...contextPackage } : contextPackage;
+    }),
+  );
+
   // ---------------- memory lifecycle ----------------
 
   const saveMemoryShape = {
@@ -317,7 +361,7 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
       .min(1)
       .max(64)
       .describe(
-        'Memory type: fact/preference/contact/state/memory for durable knowledge, insight for reviewed inferences, task for follow-ups, note for free text. The namespace policy decides which types you may create and whether they start as candidate (reviewed later) or accepted.',
+        'Policy-controlled item type: fact/preference/contact/state/memory for durable knowledge, insight for reviewed inferences, task for follow-ups, note for free text. memory_kind separately describes reusable memory semantics.',
       ),
     title: z.string().min(1).max(500).describe('Short one-line summary'),
     content: z.string().max(50_000).default('').describe('Full detail, plain text or markdown'),
@@ -329,6 +373,10 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
       .default([])
       .describe('Related entities as "kind:name", e.g. ["person:王小明", "project:Q3-report"]'),
     confidence: z.number().min(0).max(1).optional().describe('How sure you are (insights)'),
+    memory_kind: z
+      .enum(MEMORY_KINDS)
+      .optional()
+      .describe('Reusable semantics: fact/preference/decision/experience/procedure/relationship/working_state. Omit for a source projection.'),
     derived_from: z
       .array(z.string())
       .max(20)
@@ -336,6 +384,10 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
       .describe('Insights only: ids of the NON-insight items this inference is based on'),
     occurred_at: z.string().optional().describe('When the underlying event happened (ISO 8601)'),
     expires_at: z.string().optional().describe('Optional TTL (ISO 8601)'),
+    valid_from: z.string().optional().describe('When this assertion starts being valid (ISO 8601)'),
+    valid_until: z.string().optional().describe('When this assertion stops being valid (ISO 8601)'),
+    last_verified_at: z.string().optional().describe('Last explicit verification time (ISO 8601)'),
+    decay_policy: z.enum(DECAY_POLICIES).optional().describe('none, standard, or rapid relevance decay'),
     sensitivity: z.enum(['normal', 'private']).default('normal'),
     status: z.enum(STATUSES).default('active'),
     source_item_id: z
@@ -562,6 +614,27 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
       const item = commands.readOperationalState(client, args.state_key);
       if (!item) throw new NotFoundError(`no state slot "${args.state_key}"`);
       return { item };
+    }),
+  );
+
+  server.registerTool(
+    'record_context_outcome',
+    {
+      title: 'Record whether context changed the action',
+      description:
+        'Record coarse effectiveness feedback for a compiled context package: whether it changed the agent action and whether the result was helpful. Only package/item ids and coarse labels are stored — never prompts, action text, or package contents.',
+      inputSchema: {
+        package_id: z.string().min(1).max(100),
+        item_ids: z.array(z.string().min(1)).max(50).default([]),
+        outcome: z.enum(['helpful', 'mixed', 'harmful', 'unknown']),
+        action_changed: z.boolean(),
+        idempotency_key: z.string().min(1).max(200),
+      },
+    },
+    guarded((args: any) => {
+      if (!canWrite) throw new PolicyDeniedError('this API key lacks the "write" scope');
+      const { idempotency_key, ...input } = args;
+      return commands.recordContextOutcome(client, input, idempotency_key);
     }),
   );
 
