@@ -119,7 +119,7 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
     {
       title: 'Search cross-app context',
       description:
-        "Full-text search over this namespace of the user's memory hub (apps' projections, accepted agent memories). Call this BEFORE planning or answering questions about the user's life, schedule, money, people, or work. Supports Chinese and English; pass an array of queries to search several angles in ONE call (rank-fusion merged). Results carry provenance (authority=user/app/agent) and trust_state. Unreviewed candidates are EXCLUDED by default; include_candidates adds YOUR OWN pending proposals (reviewers see all). Use get_context_item for the full record.",
+        "Hybrid lexical, local-vector, and entity search over this namespace of the user's memory hub. Call this BEFORE planning or answering questions about the user's life, schedule, money, people, or work. Pass an array of queries to search several angles in ONE call (weighted rank-fusion merged). Results carry provenance, trust_state, and retrieval_sources. Unreviewed candidates are EXCLUDED by default. Use get_context_item for the full record.",
       inputSchema: {
         query: z
           .union([z.string(), z.array(z.string()).min(1).max(10)])
@@ -127,6 +127,8 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
         types: z.array(z.string()).optional().describe('Filter by item types, e.g. ["transaction","event"]'),
         sources: z.array(z.string()).optional().describe('Filter by source client ids (see list_context_sources)'),
         tags: z.array(z.string()).optional().describe('Only items carrying ALL of these tags'),
+        entities: z.array(z.string()).optional().describe('Boost exact/partial structured entity matches'),
+        mode: z.enum(['hybrid', 'lexical']).default('hybrid'),
         since: z.string().optional().describe('Only items on/after this ISO 8601 datetime'),
         until: z.string().optional().describe('Only items on/before this ISO 8601 datetime'),
         limit: z.number().int().min(1).max(50).default(10),
@@ -144,7 +146,7 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
       if (!canRead) throw new PolicyDeniedError('this API key lacks the "read" scope');
       const queries = typeof args.query === 'string' ? [args.query] : args.query;
       const { sensitivity, note: privacyNote } = resolveSensitivity(args.include_private);
-      const { items, totalMatched, note } = commands.search(client, {
+      const { items, totalMatched, retrieval, note } = commands.search(client, {
         queries,
         filters: {
           types: args.types,
@@ -155,11 +157,14 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
           sensitivity,
         },
         limit: args.limit,
+        mode: args.mode,
+        entities: args.entities,
         includeCandidates: args.include_candidates,
       });
       return {
         total_matched: totalMatched,
         returned: items.length,
+        retrieval,
         note: [privacyNote, note].filter(Boolean).join('; ') || undefined,
         hint:
           totalMatched > items.length
@@ -325,6 +330,7 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
       inputSchema: {
         intent: z.string().min(1).max(10_000).describe('The task or decision this context must support'),
         queries: z.array(z.string().min(1).max(1000)).max(5).optional(),
+        entities: z.array(z.string().min(1).max(200)).max(50).optional(),
         target_agent: z.enum(CONTEXT_TARGETS).default('generic'),
         token_budget: z.number().int().min(256).max(32_000).default(4000),
         sources: z.array(z.string()).max(50).optional(),
@@ -348,6 +354,7 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
         tokenBudget: args.token_budget,
         filters: { sources: args.sources, types: args.types, tags: args.tags, sensitivity },
         stateKeys: args.state_keys,
+        entities: args.entities,
       });
       return note ? { note, ...contextPackage } : contextPackage;
     }),

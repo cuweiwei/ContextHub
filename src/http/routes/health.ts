@@ -19,11 +19,13 @@ export function registerHealthRoutes(app: FastifyInstance, deps: AppDeps): void 
       diskFreeBytes = null;
     }
     const degraded = !auditWritable;
+    const retrievalProjection = deps.itemsRepo.retrievalProjectionStatus();
     return reply.code(degraded ? 503 : 200).send({
       status: degraded ? 'degraded' : 'ok',
       service: 'contexthub',
       audit_writable: auditWritable,
       disk_free_bytes: diskFreeBytes,
+      retrieval_projection: retrievalProjection,
     });
   });
 }

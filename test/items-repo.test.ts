@@ -167,6 +167,68 @@ describe('items-repo', () => {
     expect(items[0]!.title).toBe('ContextHub deployment');
   });
 
+  it('fuses local-vector and structured-entity candidates with retrieval diagnostics', () => {
+    const target = insert(
+      'projects',
+      makeItem({
+        title: 'ContextHub deployment checklist',
+        content: 'NAS rollout validation and rollback procedure',
+        entities: ['project:Orion'],
+      }),
+    ).item;
+
+    const typo = env.itemsRepo.search(ADMIN_ACCESS, {
+      queries: ['ContextHbu deploymnt cheklist'],
+      limit: 10,
+      surface: 'accepted',
+      mode: 'hybrid',
+    });
+    expect(typo.items[0]?.id).toBe(target.id);
+    expect(typo.items[0]?.retrieval_sources).toContain('vector');
+    expect(typo.retrieval).toMatchObject({
+      mode: 'hybrid',
+      embedding_model: 'local-feature-hash-v1',
+    });
+
+    const entity = env.itemsRepo.search(ADMIN_ACCESS, {
+      queries: ['目前專案進度'],
+      entities: ['project:Orion'],
+      limit: 10,
+      surface: 'accepted',
+      mode: 'hybrid',
+    });
+    expect(entity.items[0]?.id).toBe(target.id);
+    expect(entity.items[0]?.retrieval_sources).toContain('entity');
+  });
+
+  it('applies ACL and validity filters inside vector/entity candidate SQL', () => {
+    insert(
+      'private-source',
+      makeItem({
+        title: 'Confidential Atlas deployment',
+        content: 'restricted migration procedure',
+        sensitivity: 'private',
+        entities: ['project:Atlas'],
+      }),
+    );
+    const normalReader: ReadAccess = {
+      clientId: 'normal',
+      isAdmin: false,
+      namespace: 'personal',
+      readSources: null,
+      maxSensitivity: 'normal',
+    };
+    const result = env.itemsRepo.search(normalReader, {
+      queries: ['Confidental Atlas deploymnt'],
+      entities: ['project:Atlas'],
+      limit: 10,
+      surface: 'accepted',
+      mode: 'hybrid',
+    });
+    expect(result.totalMatched).toBe(0);
+    expect(result.retrieval.candidate_counts).toMatchObject({ vector: 0, entity: 0, fused: 0 });
+  });
+
   it('filters by tags, types, sources, and statuses', () => {
     insert('a', makeItem({ title: 't1', tags: ['x', 'y'], type: 'note' }));
     insert('a', makeItem({ title: 't2', tags: ['x'], type: 'task' }));
@@ -231,12 +293,16 @@ describe('items-repo', () => {
     expect(env.itemsRepo.search(ADMIN_ACCESS, { queries: ['新方向'], limit: 10, surface: 'accepted' }).totalMatched).toBe(1);
   });
 
-  it('reindex() rebuilds the FTS index from scratch (restore path)', () => {
+  it('reindex() rebuilds every retrieval projection from scratch (restore path)', () => {
     insert('a', makeItem({ title: '財務規劃筆記' }));
     insert('a', makeItem({ title: 'plain english note' }));
     env.db.exec('DELETE FROM items_fts'); // simulate a stale/invalid index after restore
-    const { indexed } = env.itemsRepo.reindex();
+    env.db.exec('DELETE FROM item_embeddings');
+    expect(env.itemsRepo.retrievalProjectionStatus().ready).toBe(false);
+    const { indexed, vectorIndexed } = env.itemsRepo.reindex();
     expect(indexed).toBe(2);
+    expect(vectorIndexed).toBe(2);
+    expect(env.itemsRepo.retrievalProjectionStatus().ready).toBe(true);
     expect(env.itemsRepo.search(ADMIN_ACCESS, { queries: ['財務'], limit: 10, surface: 'accepted' }).totalMatched).toBe(1);
   });
 

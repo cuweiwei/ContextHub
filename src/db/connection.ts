@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
+import * as sqliteVec from 'sqlite-vec';
 import { migrate } from './migrations.js';
 
 export type DB = Database.Database;
@@ -23,6 +24,9 @@ export function openDatabase(file: string, opts: OpenOptions = {}): DB {
     fs.mkdirSync(path.dirname(file), { recursive: true });
   }
   const db = new Database(file);
+  // sqlite-vec accelerates a rebuildable query projection only. Domain rows
+  // in context_items remain the sole authority.
+  sqliteVec.load(db);
   db.pragma('journal_mode = WAL');
   db.pragma(`synchronous = ${opts.synchronous ?? 'FULL'}`);
   db.pragma('foreign_keys = ON');

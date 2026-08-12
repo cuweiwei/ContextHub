@@ -146,6 +146,8 @@ describe('MCP endpoint', () => {
     expect(compiled.constraints).toMatchObject({ accepted_only: true, active_only: true, namespace: 'personal' });
     expect(compiled.sections.sources.map((item: any) => item.id)).toContain(budgetItemId);
     expect(compiled.sections.memories.map((item: any) => item.id)).toContain(memory.id);
+    expect(compiled.retrieval).toMatchObject({ mode: 'hybrid', embedding_model: 'local-feature-hash-v1' });
+    expect(compiled.sections.memories[0].retrieval_sources.length).toBeGreaterThan(0);
     expect(compiled.rendered_context).toContain('Compiled context');
     expect(compiled.estimated_tokens).toBeLessThanOrEqual(1200);
 

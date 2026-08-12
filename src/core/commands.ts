@@ -22,7 +22,11 @@ import {
   type PolicyV1,
 } from './policy.js';
 import type { PoliciesRepo } from './policies-repo.js';
-import { compileContextPackage, type ContextTarget } from './context-compiler.js';
+import {
+  compileContextPackage,
+  type ContextCandidate,
+  type ContextTarget,
+} from './context-compiler.js';
 import { ulid } from './ids.js';
 import {
   accessFor,
@@ -832,6 +836,7 @@ export function createCommands(deps: CommandDeps) {
       tokenBudget: number;
       filters?: Parameters<ItemsRepo['search']>[1]['filters'];
       stateKeys?: string[];
+      entities?: string[];
     },
   ) {
     return readAudited(
@@ -854,9 +859,16 @@ export function createCommands(deps: CommandDeps) {
           filters: { ...opts.filters, statuses: ['active'] },
           limit: 100,
           surface: 'accepted',
+          mode: 'hybrid',
+          entities: opts.entities,
         });
         const scoreById = new Map(found.items.map((item) => [item.id, item.score]));
-        const candidates = found.fullItems.map((item) => ({ item, score: scoreById.get(item.id) ?? 0 }));
+        const sourcesById = new Map(found.items.map((item) => [item.id, item.retrieval_sources]));
+        const candidates: ContextCandidate[] = found.fullItems.map((item) => ({
+          item,
+          score: scoreById.get(item.id) ?? 0,
+          retrieval_sources: sourcesById.get(item.id) ?? [],
+        }));
 
         for (const stateKey of new Set(opts.stateKeys ?? [])) {
           requireCap(ctx, 'state.read');
@@ -868,7 +880,7 @@ export function createCommands(deps: CommandDeps) {
           if (!item || item.status !== 'active' || (item.expires_at && item.expires_at <= new Date().toISOString())) {
             continue;
           }
-          candidates.push({ item, score: 1 });
+          candidates.push({ item, score: 1, retrieval_sources: ['state'] });
         }
 
         return compileContextPackage({
@@ -876,6 +888,7 @@ export function createCommands(deps: CommandDeps) {
           target: opts.target,
           tokenBudget: opts.tokenBudget,
           candidates,
+          retrieval: found.retrieval,
         });
       },
     );
@@ -1001,11 +1014,13 @@ export function createCommands(deps: CommandDeps) {
         types: opts.filters?.types ?? null,
         sources: opts.filters?.sources ?? null,
         limit: opts.limit,
+        retrieval_mode: opts.mode ?? 'hybrid',
+        entity_count: opts.entities?.length ?? 0,
         include_candidates: Boolean(opts.includeCandidates),
       },
       (ctx) => {
         const { surface, note } = surfaceFor(ctx, Boolean(opts.includeCandidates));
-        const res = itemsRepo.search(ctx.access, { ...opts, surface });
+        const res = itemsRepo.search(ctx.access, { ...opts, mode: opts.mode ?? 'hybrid', surface });
         return { ...res, note };
       },
     );

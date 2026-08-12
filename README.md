@@ -9,7 +9,8 @@
 遷移說明見 [docs/AGENT-GUIDE.md](docs/AGENT-GUIDE.md)。完整設計見
 [docs/DESIGN.md](docs/DESIGN.md);信任邊界與資料治理見
 [docs/ADR-001](docs/ADR-001-trust-boundary.md)；Context／Memory 分層決策見
-[docs/ADR-002](docs/ADR-002-context-memory-separation.md)。
+[docs/ADR-002](docs/ADR-002-context-memory-separation.md)；v6 混合查找決策見
+[docs/ADR-003](docs/ADR-003-hybrid-memory-retrieval.md)。
 
 ```mermaid
 flowchart TB
@@ -22,17 +23,18 @@ flowchart TB
   end
 
   POLICY["Policy & governance<br/>namespace · authority · provenance · ACL<br/>sensitivity · trust · audit · conflict"]
-  CC["Context Compiler<br/>intent · retrieval · authority/freshness ranking<br/>validity · dedup · token budget · target formatting"]
+  RET["Hybrid Retrieval Engine<br/>FTS5 · local vector · entities · exact state<br/>weighted RRF · lifecycle"]
+  CC["Context Compiler<br/>authority/freshness ranking · validity<br/>dedup · token budget · target formatting"]
   PKG["Ephemeral Context Package<br/>not stored as memory"]
   AGENTS["AI agents<br/>ChatGPT · Claude · Codex · Cursor · Hermes"]
   ACTION["Action"]
   OUTCOME["Outcome feedback<br/>ids + coarse labels only"]
   FORM["Memory formation<br/>observe · extract · classify · score · propose<br/>review · consolidate · update · supersede/forget"]
 
-  SP --> CC
-  MEM --> CC
-  STATE --> CC
-  POLICY --> CC
+  SP --> RET
+  MEM --> RET
+  STATE -->|"authorized exact key"| RET
+  POLICY --> RET --> CC
   POLICY --> FORM
   CC --> PKG --> AGENTS --> ACTION --> OUTCOME --> FORM --> MEM
 ```
@@ -45,6 +47,7 @@ Agent runtime 仍負責 system/user instructions 與即時 tool output 的最後
 nvm use
 npm ci
 npm test          # tsc typecheck + vitest(隔離/信任/政策/稽核/一致性/還原邊界)
+npm run benchmark:retrieval -- --items=2000 # recall@5/MRR + p50/p95，可調資料量
 npm run dev       # http://localhost:8787
 npm run e2e       # 真實 HTTP 端對端:REST↔MCP 一致性 → 備份 → 還原 → reindex → 驗證
 ```
@@ -91,6 +94,8 @@ sudo /var/packages/Tailscale/target/bin/tailscale serve \
   --bg --yes --tcp=8788 tcp://127.0.0.1:8788
 
 curl http://<nas-tailscale-ip>:8788/health   # {"status":"ok","audit_writable":true,...}
+docker compose exec contexthub node dist/cli.js reindex
+docker compose exec contexthub node dist/cli.js retrieval-status
 ```
 
 **備份**(每日 NAS 排程;WAL 下直接複製 `.db` 不是一致備份):
@@ -123,7 +128,9 @@ claude mcp add --transport http contexthub-work http://<nas-tailscale-ip>:8788/m
 Codex 的安全設定、personal/work credential 隔離與 smoke test 見
 [docs/CODEX.md](docs/CODEX.md)。
 
-18 個工具。讀取面：`compile_context`（依 intent、有效期、authority/freshness、ACL 與 token budget 產生短暫 package）、`search_context`（中文、多查詢合併、結果帶 information_class/memory_kind/authority/trust_state）、`get_current_context`、`get_recent_context`、`get_context_item`、`get_context_brief`、`list_context_sources`、`get_memory_history`（版本＋裁決史）、`my_candidates`（自己的待審）。
+18 個工具。讀取面：`compile_context`（依 intent、有效期、authority/freshness、ACL 與 token budget 產生短暫 package）、`search_context`（預設 hybrid：FTS5 + 本地向量 + structured entity，weighted RRF；結果帶 retrieval diagnostics、information_class/memory_kind/authority/trust_state）、`get_current_context`、`get_recent_context`、`get_context_item`、`get_context_brief`、`list_context_sources`、`get_memory_history`（版本＋裁決史）、`my_candidates`（自己的待審）。
+
+v6 的 `local-feature-hash-v1` 是完全本地、同步、可重現的 384 維 similarity embedding，擅長 typo／字形近似與欄位加權；它不宣稱具備大型神經模型的同義詞理解。embedding provider 可替換成另一個同步 on-device model，而 ACL、domain rows 與 API 不需改變。`item_embeddings` 與 FTS 都只是 projection；SQLite `context_items` 仍是唯一權威。
 
 記憶與回饋生命週期：`save_memory`（可標記 fact／preference／decision／experience／procedure／relationship／working_state）、`propose_insight`（推論＋evidence）、`revise_my_candidate`、`propose_successor`（取代過時的 accepted Memory，裁決原子寫回）、`record_context_outcome`（只記 context 是否改變行動及粗粒度結果）、`operate_task`、`curate_note`、`update_operational_state`／`get_operational_state`（exact-key 狀態槽）。
 
@@ -162,13 +169,13 @@ Human reviewer 可從 Tailscale 私網開啟 `http://<NAS_TAILSCALE_IP>:8788/rev
 src/
   core/    # 單點強制層:commands(mutation+稽核+idempotency)、context-compiler(短暫 package)、
            #   items-repo(applyFilters:namespace+trust+ACL+validity)、policy/policies-repo、audit-repo、
-           #   clients-repo(immutable identity)、canonical、cjk、errors
+           #   local-embedding(pluggable on-device provider)、clients-repo、canonical、cjk、errors
   http/    # Fastify:auth + /v1 routes(items/candidates/review/task-op/curate/state/
            #   history/audit/policies/clients/namespaces)+ /explore + /review + health
   mcp/     # MCP server(18 tools)+ Streamable HTTP 掛載(stateless,一 key 一 namespace)
-  db/      # SQLite 連線(synchronous=FULL、instance lock)+ 內嵌 migrations(v1–v6)
-  cli.ts   # create-client/rotate-key/policy-*/review/candidates/audit/reindex/backup/purge/...
-scripts/   # e2e.sh(REST↔MCP 一致性+備份還原全流程)、restore.sh(NAS runbook)
+  db/      # SQLite+sqlite-vec 連線(synchronous=FULL、instance lock)+ migrations(v1–v7)
+  cli.ts   # create-client/.../reindex/retrieval-status/backup/purge/...
+scripts/   # retrieval-benchmark.ts、e2e.sh、restore.sh(NAS runbook)
 test/      # 100+ tests:隔離/信任/政策/稽核 fail-closed/idempotency/一致性/還原邊界
-docs/      # USER-GUIDE、AGENT-GUIDE(agent 操作/記憶遷移)、CODEX、DESIGN、ADR-001
+docs/      # USER-GUIDE、AGENT-GUIDE、CODEX、DESIGN、ADR-001/002/003
 ```

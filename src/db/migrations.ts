@@ -430,6 +430,24 @@ const MIGRATIONS: {
       }
     },
   },
+  {
+    version: 7,
+    name: 'hybrid-retrieval-projection',
+    sql: `
+      -- Rebuildable local vector projection. It intentionally stores no
+      -- namespace/trust/ACL authority: every read joins context_items and
+      -- applies the authoritative filters before ranking.
+      CREATE TABLE item_embeddings (
+        item_id TEXT PRIMARY KEY REFERENCES context_items(id) ON DELETE CASCADE,
+        model TEXT NOT NULL,
+        dimensions INTEGER NOT NULL CHECK (dimensions > 0),
+        content_hash TEXT NOT NULL,
+        embedding BLOB NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX idx_item_embeddings_model ON item_embeddings(model, dimensions);
+    `,
+  },
 ];
 
 export function migrate(db: Database.Database): void {

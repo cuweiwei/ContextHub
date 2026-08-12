@@ -1,8 +1,8 @@
-# ContextHub 設計文件(v5)
+# ContextHub 設計文件(v6)
 
 > 單節點、隱私優先、具 namespace 隔離、信任升格、Memory 生命週期與短暫 Context 編譯能力的**跨 AI Context Control Plane**，部署於私人 NAS。Codex、Claude Code、個人 Hermes、工作 Hermes 共用由使用者擁有、與 AI vendor 無關的 context domain。
 
-信任邊界、work 資料治理、DR 承諾見 [ADR-001](ADR-001-trust-boundary.md)；Context／Memory 分層決策見 [ADR-002](ADR-002-context-memory-separation.md)。
+信任邊界、work 資料治理、DR 承諾見 [ADR-001](ADR-001-trust-boundary.md)；Context／Memory 分層決策見 [ADR-002](ADR-002-context-memory-separation.md)；v6 混合查找決策見 [ADR-003](ADR-003-hybrid-memory-retrieval.md)。
 
 ## 1. 問題與動機
 
@@ -16,11 +16,11 @@ AI agents 對使用者的理解破碎:財務在記帳 app、人際在 CRM、工�
 - 個人與工作記憶以 namespace 嚴格隔離;所有讀寫留稽核;所有版本與裁決可追溯
 - 資料、索引、處理全部留在自己的硬體上,不依賴公有雲
 
-### 定位原則(v5 修訂)
+### 定位原則(v6 修訂)
 
 1. **對 AI 記憶,hub 是 system of record**:版本歷史、審核事件、衝突裁決都保存在 hub,永久 append-only。
 2. **對 app 資料,hub 仍是 projection**:寫進來的是「AI 決策有用的投影」,原始明細留在來源 app(`source_uri` 回連)。
-3. **SQLite 是唯一權威儲存;FTS 索引只是可完全重建的 projection**(`reindex` 隨時全量重建;restore 後必跑)。
+3. **SQLite `context_items` 是唯一權威儲存；FTS 與 `item_embeddings` 都只是可完全重建的 projection**（`reindex` 隨時全量重建；restore／v6 upgrade 後必跑）。
 4. **單一 active instance、單一 writer**(啟動時 exclusive lock 強制,第二個 instance fail fast)。
 5. **未經 owner 明確同意:不建立替代權威儲存、不遷移、不切換。**
 6. **Memory ≠ Context**：Memory 回答「應該長期保留什麼」；Context Compiler 回答「這次模型應該看到什麼」。
@@ -30,7 +30,7 @@ AI agents 對使用者的理解破碎:財務在記帳 app、人際在 CRM、工�
 
 **承諾**:namespace 是 server-side security boundary(caller 不可偽造);REST/MCP 是同一 domain model 的兩個介面(共用同一套 commands/authz/稽核);agent 產生內容不因寫入成功自動成為共享事實;衝突模型=單一 winner successor/supersession;每次讀寫都稽核(fail-closed);commit ack 後任何介面的後續讀取見該版本或更新(單 writer linearizability);可重複部署/備份/還原。
 
-**非目標(誠實邊界)**:HA/多副本;administrator-proof audit(具 NAS/DB admin 權限者可直接改 SQLite——見 ADR-001 威脅模型);通用 ABAC;wildcard state rules;語意搜尋(v5 接縫仍在:搜尋已抽象在 repo)。
+**非目標(誠實邊界)**:HA/多副本;administrator-proof audit(具 NAS/DB admin 權限者可直接改 SQLite——見 ADR-001 威脅模型);通用 ABAC;wildcard state rules;預設 feature-hash embedding 不宣稱具有大型神經模型的同義詞推理能力。
 
 ## 3. 架構總覽
 
@@ -45,7 +45,8 @@ flowchart TB
   end
 
   Governance["Policy / governance<br/>namespace · authority · provenance · ACL · sensitivity<br/>trust · acceptance · audit · idempotency · conflict"]
-  Compiler["Context Compiler<br/>intent resolution · retrieval · ranking · validity/freshness<br/>dedup · token budget · target formatting"]
+  Retrieval["Hybrid Retrieval Engine<br/>FTS5 · local vector · entity · exact state<br/>ACL-first · weighted RRF · lifecycle"]
+  Compiler["Context Compiler<br/>authority/freshness · dedup<br/>token budget · target formatting"]
   Package["Ephemeral Context Package<br/>accepted + active only<br/>not a database row"]
   Runtime["Agent runtime<br/>system/user instructions + live tool output<br/>+ compiled persistent context"]
   Agents["ChatGPT · Claude · Codex · Cursor · Hermes"]
@@ -53,10 +54,10 @@ flowchart TB
   Outcome["Outcome feedback<br/>package/item ids · helpfulness · action_changed"]
   Formation["Memory lifecycle<br/>observe → extract → classify → score → propose → review<br/>→ consolidate → retrieve → update → supersede / forget"]
 
-  Sources --> Compiler
-  Memory --> Compiler
-  State --> Compiler
-  Governance --> Compiler
+  Sources --> Retrieval
+  Memory --> Retrieval
+  State -->|"authorized exact key"| Retrieval
+  Governance --> Retrieval --> Compiler
   Governance --> Formation
   Compiler --> Package --> Runtime --> Agents --> Action --> Outcome --> Formation --> Memory
 ```
@@ -137,12 +138,25 @@ ContextHub 不保存全部 chat history。Memory formation 使用既有安全路
 
 `state_kind=operational` 的項目(如預算儀表)**不進**一般讀取面,只透過 `GET/PUT /v1/state/:key` 或對應 MCP tools 存取,由 state_rules 裁決。更新必須:命中 exact key、schema_id 完全相符、value 通過已註冊 schema、欄位在 mutable allowlist、expected_revision 正確。
 
-## 6. Context Compiler
+## 6. Hybrid Memory Retrieval Engine
+
+`items-repo.search()` 是單一查找入口；REST、MCP 與 Context Compiler 不各自實作搜尋。v6 的候選源為：
+
+1. **Lexical**：FTS5 unicode61、CJK 對稱切分、BM25；零命中時才用 bounded LIKE fallback。
+2. **Vector**：`sqlite-vec` 的 `vec_distance_cosine()`，對 `local-feature-hash-v1` 384 維本地 embedding 做 exact top-k。此 provider 同步、無網路、可注入替換；預設強項是 typo／形近與欄位加權，不冒充 neural semantic model。
+3. **Entity**：`entities` JSON array 的 exact／partial structured match；client 可明確傳 entity hints，query tokens 也會做保守推斷。
+4. **State**：operational state 不進一般索引；只由 compiler 對明確 `state_keys` 套 exact state rule 後加入。
+
+每一路候選 SQL 都在排名前呼叫同一個 `applyFilters()`：namespace → deleted/expiry/validity → trust surface → source/evidence ACL → sensitivity → type/status/tag/time。未授權 row 不會先成為 application-level candidate 再被丟棄。候選以 weighted Reciprocal Rank Fusion 合併，再乘 lifecycle/decay/confidence；回傳每筆 `retrieval_sources` 以及 mode、model、各路 candidate counts、elapsed time，方便 eval 與除錯，但 audit 不保存 query text。
+
+`item_embeddings` 只保存 item id、model、dimensions、content hash、BLOB vector 與時間；不保存第二份內容，也不承擔 namespace/trust 真相。create/update/delete 與 projection 同 transaction 更新；`reindex` 會先清空 FTS/vector，再從 `context_items` 重建。`retrieval-status` 與 `/health.retrieval_projection` 回報 model/version/coverage。Migration v7 不在 migration transaction 計算舊資料 embeddings；升級後服務仍可 lexical fallback，但部署驗收必跑 `reindex` 直到 `ready=true`。
+
+## 7. Context Compiler
 
 `POST /v1/context/compile` 與 MCP `compile_context` 共用 `commands.compileContext()`：
 
 1. 以 task intent + optional related queries 做 deterministic intent expansion（中文 bigram／英數 token），不呼叫隱藏 LLM。
-2. `items-repo.search()` 先在 SQL 套 namespace、accepted-only、active、ACL、sensitivity、source allowlist、validity 與 operational-state 排除，再做 FTS/LIKE retrieval。
+2. `items-repo.search(mode=hybrid)` 取得 lexical／local-vector／entity 候選與 retrieval diagnostics；所有候選源先套 §6 的權威 filter。
 3. relevance score 加上 lifecycle/decay、confidence 與 authority weighting；相同 title+content 正規化去重。
 4. 明確指定的 `state_keys` 逐一通過 exact state rule，才可加入 task_state。
 5. 每個可用 information layer 至少有一筆機會，再依 global score 填入 token budget；無法容納者回報在 `omitted.budget`。
@@ -150,7 +164,7 @@ ContextHub 不保存全部 chat history。Memory formation 使用既有安全路
 
 Compiler 回傳 `package_id`、sections、constraints、estimated tokens 與 `rendered_context`，但**不持久化 intent 或 package**。每次 compile 是 fail-closed audited read；audit details 只記 query count、target、budget、state-key count，不記 task text。
 
-## 7. 身分、認證與 ACL
+## 8. 身分、認證與 ACL
 
 - **Client id = immutable principal identity**:slug PK 永不重用(只停用不刪除);`rotate-key` 換金鑰保留身分(credential_version+1,舊 key 立即失效);政策與稽核連續性不斷。
 - Key:`chk_` + 32B base64url,DB 只存 sha256。admin 用 `ADMIN_TOKEN` env(timing-safe;是 break-glass/管理憑證,**不偽裝成 namespace principal**;日常審核用各 namespace 的 human reviewer client)。
@@ -158,15 +172,15 @@ Compiler 回傳 `package_id`、sections、constraints、estimated tokens 與 `re
 - 既有 ACL 不變並疊加在 namespace 之內:`max_sensitivity` 讀取天花板、`read_sources` 來源白名單、insight evidence ACL 繼承(防洗白)、無權=404 不洩存在性。
 - **單點強制**:所有 list 形讀取過 `applyFilters()`(namespace 判準第一條),所有 mutation 過 `core/commands.ts`。新 route 無法繞過。
 
-## 8. 稽核(fail-closed)與 idempotency
+## 9. 稽核(fail-closed)與 idempotency
 
 - `audit_log` append-only(程式無 UPDATE/DELETE 路徑):每次讀取(先寫稽核列**才**執行查詢;寫不進→503)、每次 mutation(與操作同 transaction,稽核失敗=整筆回滾)、每次拒絕(reason code)、每個 admin/policy 操作。
 - details 只放摘要:route/tool、filter 種類、筆數、deny reason——**不放**原始 query 全文、item 內容、snippet。
 - 非 admin 的 `audit.read` 釘死在自己的 namespace——個人與工作稽核軌各自獨立。
-- `/health` 回報 `audit_writable` 與磁碟剩餘空間;disk-full 即 fail-closed(搭配 NAS 監控告警)。
+- `/health` 回報 `audit_writable`、磁碟剩餘空間與 retrieval projection coverage；disk-full 即 fail-closed(搭配 NAS 監控告警)。索引 coverage 不足不阻斷 lexical read，但部署驗收不得視為完成。
 - **Idempotency 是 SoR 正確性需求**:所有 mutation 必填 `Idempotency-Key`(MCP tool schema 必填,agent 每個邏輯操作產一個 UUID)。同 key 同 payload→回存好的原結果(不重執行);同 key 異 payload→409。記錄與 mutation 同 transaction,90 天 TTL(`idempotency-gc`)。
 
-## 9. REST API(v5)
+## 10. REST API(v6)
 
 認證 `Authorization: Bearer chk_…`;錯誤 `{"error":{"code","message"}}`;409=`source_item_conflict / revision_conflict / idempotency_conflict`、403=`policy_denied`、503=`audit_unavailable`。
 
@@ -174,7 +188,7 @@ Compiler 回傳 `package_id`、sections、constraints、estimated tokens 與 `re
 |---|---|
 | `POST /v1/items` | create_memory:trust 由 create_rules 決定;`idempotency_key` 必填;per-type upsert 同 §4 |
 | `POST /v1/items/batch` | ≤100 筆單 transaction;`Idempotency-Key` header 必填 |
-| `GET /v1/items` | 搜尋/列表(accepted 面;`include_candidates` 加自己的 candidates,reviewer 加全部) |
+| `GET /v1/items` | 搜尋/列表(預設 `retrieval_mode=hybrid`，可設 lexical；`entity` hints；accepted 面) |
 | `GET /v1/items/:id` | 無權/跨 namespace/不存在同回 404 |
 | `GET /v1/items/:id/history` | 版本快照+審核事件 |
 | `PATCH /v1/items/:id` | 僅 service/human 改**自己的**投影(insight/transaction/operational 不可);agent 一律 403;`expected_revision`+`Idempotency-Key` 必填 |
@@ -192,19 +206,19 @@ Compiler 回傳 `package_id`、sections、constraints、estimated tokens 與 `re
 | `GET /v1/audit` | 稽核查詢(admin 全部;audit.read 限own namespace) |
 | `GET/PUT /v1/policies/:ns`、`GET /v1/policies/:ns/versions/:v` | 政策讀取/升版(policy.manage 限own ns)/歷史版 |
 | `POST /v1/clients`(namespace+principal_kind 必填,選配 profile)、`POST /v1/clients/:id/rotate-key`、`PATCH /v1/clients/:id`、`GET/POST /v1/namespaces`、`GET/PUT /v1/state-schemas/:id` | 管理(admin) |
-| `GET /health` | 監控(audit_writable、disk_free_bytes) |
+| `GET /health` | 監控(audit_writable、disk_free_bytes、retrieval_projection) |
 
-## 10. MCP tools(18 個)
+## 11. MCP tools(18 個)
 
 Endpoint `POST /mcp`(Streamable HTTP stateless)。連線=namespace 邊界。
 
-讀取面：`compile_context`（短暫 package）、`search_context`（`include_candidates`=自己的）、`get_current_context`、`get_recent_context`、`get_context_item`、`get_context_brief`、`list_context_sources`、`get_memory_history`、`my_candidates`。
+讀取面：`compile_context`（短暫 package，包含 retrieval diagnostics）、`search_context`（`mode=hybrid|lexical`、entity hints、`include_candidates`=自己的）、`get_current_context`、`get_recent_context`、`get_context_item`、`get_context_brief`、`list_context_sources`、`get_memory_history`、`my_candidates`。
 
 記憶／回饋生命週期：`save_memory`（通用建立＋memory_kind/validity/decay）、`propose_insight`、`revise_my_candidate`、`propose_successor`、`record_context_outcome`、`operate_task`、`curate_note`、`update_operational_state`、`get_operational_state`。
 
 **審核 tools 刻意不存在**:裁決是 human credential 的事(REST/CLI)。所有工具參數都只是意圖,授權一律 server 端裁決。
 
-## 11. 一致性模型
+## 12. 一致性模型
 
 單一 Fastify process、單一 better-sqlite3 同步連線、WAL + `synchronous=FULL`(env 可調):
 
@@ -212,11 +226,13 @@ Endpoint `POST /mcp`(Streamable HTTP stateless)。連線=namespace 邊界。
 
 不承諾:HA、多副本 linearizability、零資料損失(災難場景 RPO≤24h,見 ADR-001)。部署防呆:`instance.lock.db` exclusive lock 使第二個 server process fail fast;migration 前自動 VACUUM INTO 快照。
 
-## 12. 中文搜尋與查詢效率
+## 13. 搜尋品質與效能驗收
 
-FTS5 unicode61 + 字級切分（索引與查詢對稱），2 字中文詞可搜；bm25(title×3/tags×2/content×1) + 多查詢 RRF + lifecycle weighting。明確 `decay_policy=none/standard/rapid` 分別為不衰減／90 天／14 天 half-life；舊資料未設定時沿用 type-aware 預設。`last_verified_at` 優先作為 freshness 基準；insight 乘 confidence、candidate 在可見 surface 再減半。回傳 compact 形狀包含 `information_class`、`memory_kind`、authority/trust；全文用 `get_context_item`。FTS 零命中 fallback LIKE。
+FTS5 unicode61 + 字級切分（索引與查詢對稱），2 字中文詞可搜；BM25 + local cosine vector + entity candidates 以 weighted RRF 合併，再乘 lifecycle weighting。明確 `decay_policy=none/standard/rapid` 分別為不衰減／90 天／14 天 half-life；`last_verified_at` 優先作為 freshness 基準；insight 乘 confidence。
 
-## 13. 部署、備份、還原(NAS)
+`npm run benchmark:retrieval -- --items=2000` 會在 in-memory DB 建立可重現 synthetic corpus，比較 lexical/hybrid 的 Recall@5、MRR、p50/p95，並驗證 typo、CJK、entity case。這是 regression benchmark，不等同真實個人資料的 relevance gold set；上線後應另建立不含敏感內容的 query→expected-id eval set。精確向量掃描的成本隨授權後 corpus 線性成長；若實測 p95 超過目標，再以同一 provider/ACL contract 導入 vec0 partition/ANN，而不是先犧牲授權正確性。
+
+## 14. 部署、備份、還原(NAS)
 
 ```bash
 echo "ADMIN_TOKEN=$(openssl rand -base64 32)" > .env
@@ -224,21 +240,24 @@ docker compose up -d --build
 docker compose exec contexthub node dist/cli.js create-client \
   --id hermes-personal --name "Hermes 秘書" --namespace personal \
   --principal-kind agent --profile agent-default
+docker compose exec contexthub node dist/cli.js reindex
+docker compose exec contexthub node dist/cli.js retrieval-status # ready 必須為 true
 ```
 
 - **備份**:每日 `cli backup`(VACUUM INTO 一致性快照;WAL 下直接複製活 .db 不一致)。Hyper Backup 指向 `backups/`,開啟其 client-side 加密(金鑰 owner 持有)。
-- **還原**:`scripts/restore.sh <snapshot>`——stop→移開舊 db 與 **-wal/-shm**→放快照→start→**必跑 `reindex`**(TEXT PK 的 implicit rowid 經 VACUUM 可能重編,FTS rowid 對映不可信)→health+smoke query。
+- **還原**:`scripts/restore.sh <snapshot>`——stop→移開舊 db 與 **-wal/-shm**→放快照→start→**必跑 `reindex`**（FTS 與 vectors 都視為可丟棄 projection）→`retrieval-status ready=true`→health+smoke query。
 - **每月 restore drill**(ADR-001):拿最新快照實際還原到隔離目錄驗證。`npm run e2e` 內建整條 備份→還原→reindex→驗證 流程。
 - Retention:versions/audit 永久;idempotency 90 天(`idempotency-gc` 排程);快照依 NAS 輪替。
 - Tailscale 私網,不開公網 port。Compose 的 host publication 必須綁 NAS 的
   Tailscale IP(或 local-only 的 loopback),不可綁 `0.0.0.0` 或 NAS 公網 IP。
 
-## 14. Roadmap(v6+)
+## 15. Roadmap(v7+)
 
 | 項目 | 接縫 |
 |---|---|
-| 語意搜尋(sqlite-vec + 本地 embedding) | 搜尋已抽象在 repo,加一路 vector 候選源(仍不依賴公有雲) |
-| Entity 圖譜 | `entities` 欄位已存結構化字串 |
+| Neural local embedding | 注入 `LocalEmbeddingProvider`，先以真實 eval 證明 synonym recall 改善；model 檔仍只在 owner 硬體 |
+| ANN / vec0 partition | 當真實 corpus benchmark 證明 exact scan p95 不足，再導入；ACL contract 不變 |
+| Entity 圖譜 traversal | v6 已有 entity candidate source；後續增加 canonical nodes/edges 與 bounded traversal |
 | insight-as-evidence | 需 recursive CTE evidence closure + 環檢測 |
 | Tamper-evident audit(hash chain) | audit_log append-only 已就緒 |
 | Human UI | `/explore` 提供 accepted 記憶總覽；`/review` 提供 candidates/history/accept/reject；後續可加批次審核與登入整合 |
@@ -273,7 +292,7 @@ docker compose exec contexthub node dist/cli.js create-client \
 | Reviewer 接受 agent 提案 | **仍是 `agent`** | `accepted` | `human_review` |
 | Owner 撤銷既有記憶 | 不變 | `revoked` | — |
 
-## 附錄 C:驗收問題集(v5)
+## 附錄 C:驗收問題集(v6)
 
 1. 我今天最該先處理什麼?(current_context)
 2. 這個資訊是我說的、app 記錄的、還是 agent 猜的?已審核了嗎?(authority × trust_state)

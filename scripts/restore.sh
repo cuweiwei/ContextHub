@@ -10,10 +10,8 @@
 #      never be replayed into the restored file)
 #   3. copy the snapshot into place
 #   4. start the container
-#   5. REINDEX — MANDATORY: context_items uses a TEXT primary key, so its
-#      implicit rowids can be renumbered by VACUUM; the FTS index maps by
-#      rowid and cannot be trusted after a restore. The index is a projection
-#      and is fully rebuilt from the base table.
+#   5. REINDEX — MANDATORY: FTS rowids and local vectors are rebuildable
+#      projections and are never trusted across a restore/model change.
 #   6. health check + a smoke query
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -49,8 +47,9 @@ for i in $(seq 1 60); do
   [[ $i == 60 ]] && { echo "server did not come up after restore"; exit 1; }
 done
 
-echo "== rebuilding the FTS index (mandatory after restore) =="
+echo "== rebuilding FTS + vector retrieval projections (mandatory after restore) =="
 docker compose exec contexthub node dist/cli.js reindex
+docker compose exec contexthub node dist/cli.js retrieval-status
 
 echo "== verification =="
 docker compose exec -T contexthub node -e \

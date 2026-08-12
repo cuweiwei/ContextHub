@@ -30,6 +30,8 @@ const listQuerySchema = z.object({
   tags: z.string().optional(),
   status: z.string().optional(),
   q: z.string().optional(),
+  entity: z.string().optional(),
+  retrieval_mode: z.enum(['hybrid', 'lexical']).default('hybrid'),
   since: isoDateTime.optional(),
   until: isoDateTime.optional(),
   sensitivity: z.enum(['normal', 'private', 'all']).default('all'),
@@ -168,14 +170,26 @@ export function registerItemRoutes(app: FastifyInstance, deps: AppDeps): void {
     };
     try {
       if (qp.q?.trim()) {
-        const { fullItems, totalMatched, note } = commands.search(req.client!, {
+        const { items, fullItems, totalMatched, retrieval, note } = commands.search(req.client!, {
           queries: [qp.q],
           filters,
           limit: qp.limit,
           offset: qp.offset,
+          mode: qp.retrieval_mode,
+          entities: csv(qp.entity),
           includeCandidates: qp.include_candidates,
         });
-        return reply.send({ items: fullItems, total_matched: totalMatched, offset: qp.offset, note });
+        return reply.send({
+          items: fullItems.map((item) => ({
+            ...item,
+            retrieval_sources:
+              items.find((compact) => compact.id === item.id)?.retrieval_sources ?? [],
+          })),
+          total_matched: totalMatched,
+          offset: qp.offset,
+          retrieval,
+          note,
+        });
       }
       const { items, nextCursor, note } = commands.listItems(req.client!, {
         filters,

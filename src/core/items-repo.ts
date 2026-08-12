@@ -2,6 +2,10 @@ import type { DB } from '../db/connection.js';
 import { ulid } from './ids.js';
 import { buildFtsQuery, makeSnippet, segmentCjk } from './cjk.js';
 import { canonicalizeSourcePayload } from './canonical.js';
+import {
+  DEFAULT_LOCAL_EMBEDDING,
+  type LocalEmbeddingProvider,
+} from './local-embedding.js';
 import { RevisionConflictError, SourceItemConflictError, ValidationError } from './errors.js';
 import {
   clampSensitivity,
@@ -26,6 +30,9 @@ import {
 
 const FTS_CANDIDATES = 500;
 const LIKE_CANDIDATES = 200;
+const VECTOR_CANDIDATES = 250;
+const ENTITY_CANDIDATES = 200;
+const MAX_VECTOR_DISTANCE = 0.55;
 /** Reciprocal Rank Fusion constant (standard value from the RRF paper). */
 const RRF_K = 60;
 /** Types whose relevance should NOT decay with age (durable knowledge). */
@@ -109,10 +116,35 @@ export interface SearchOptions {
   limit: number;
   offset?: number;
   surface: TrustSurface;
+  mode?: 'lexical' | 'hybrid';
+  entities?: string[];
 }
 
 export interface SearchResultItem extends CompactItem {
   score: number;
+  retrieval_sources: Array<'lexical' | 'vector' | 'entity'>;
+}
+
+export interface RetrievalDiagnostics {
+  mode: 'lexical' | 'hybrid';
+  embedding_model: string | null;
+  candidate_counts: {
+    lexical: number;
+    vector: number;
+    entity: number;
+    fused: number;
+  };
+  elapsed_ms: number;
+}
+
+export interface RetrievalProjectionStatus {
+  vector_extension_version: string;
+  embedding_model: string;
+  dimensions: number;
+  authoritative_items: number;
+  indexed_items: number;
+  missing_items: number;
+  ready: boolean;
 }
 
 export interface SourceOverview {
@@ -319,7 +351,10 @@ function lifecycleFactor(item: ContextItem, now: number): number {
 
 export type ItemsRepo = ReturnType<typeof createItemsRepo>;
 
-export function createItemsRepo(db: DB) {
+export function createItemsRepo(
+  db: DB,
+  embeddingProvider: LocalEmbeddingProvider = DEFAULT_LOCAL_EMBEDDING,
+) {
   const selectByIdem = db.prepare(
     'SELECT * FROM context_items WHERE source = ? AND idempotency_key = ?',
   );
@@ -347,6 +382,17 @@ export function createItemsRepo(db: DB) {
   `);
   const ftsInsert = db.prepare('INSERT INTO items_fts (rowid, title, content, tags) VALUES (?, ?, ?, ?)');
   const ftsDelete = db.prepare('DELETE FROM items_fts WHERE rowid = ?');
+  const embeddingUpsert = db.prepare(`
+    INSERT INTO item_embeddings (item_id, model, dimensions, content_hash, embedding, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(item_id) DO UPDATE SET
+      model = excluded.model,
+      dimensions = excluded.dimensions,
+      content_hash = excluded.content_hash,
+      embedding = excluded.embedding,
+      updated_at = excluded.updated_at
+  `);
+  const embeddingDelete = db.prepare('DELETE FROM item_embeddings WHERE item_id = ?');
   const evidenceInsert = db.prepare('INSERT OR IGNORE INTO insight_evidence (insight_id, evidence_id) VALUES (?, ?)');
   const evidenceClear = db.prepare('DELETE FROM insight_evidence WHERE insight_id = ?');
   const evidenceSelect = db.prepare('SELECT evidence_id FROM insight_evidence WHERE insight_id = ? ORDER BY evidence_id');
@@ -357,14 +403,37 @@ export function createItemsRepo(db: DB) {
     'INSERT INTO item_reviews (item_id, item_revision, decision, decided_by, decided_at, note) VALUES (?, ?, ?, ?, ?, ?)',
   );
 
-  function indexItem(rowid: number | bigint, item: Pick<ContextItem, 'title' | 'content' | 'tags' | 'state_kind'>): void {
+  function indexItem(
+    rowid: number | bigint,
+    item: Pick<ContextItem, 'id' | 'title' | 'content' | 'tags' | 'entities' | 'state_kind'>,
+  ): void {
     // Operational state slots never enter the general read surfaces, so they
     // are not indexed either.
-    if (item.state_kind === 'operational') return;
+    if (item.state_kind === 'operational') {
+      embeddingDelete.run(item.id);
+      return;
+    }
     ftsInsert.run(rowid, segmentCjk(item.title), segmentCjk(item.content), segmentCjk(item.tags.join(' ')));
+    const vector = embeddingProvider.embedItem(item);
+    if (vector.length !== embeddingProvider.dimensions) {
+      throw new Error(
+        `embedding provider ${embeddingProvider.model} returned ${vector.length} dimensions; expected ${embeddingProvider.dimensions}`,
+      );
+    }
+    embeddingUpsert.run(
+      item.id,
+      embeddingProvider.model,
+      embeddingProvider.dimensions,
+      embeddingProvider.contentHash(item),
+      Buffer.from(vector.buffer, vector.byteOffset, vector.byteLength),
+      new Date().toISOString(),
+    );
   }
 
-  function reindexItem(id: string, item: Pick<ContextItem, 'title' | 'content' | 'tags' | 'state_kind'>): void {
+  function reindexItem(
+    id: string,
+    item: Pick<ContextItem, 'id' | 'title' | 'content' | 'tags' | 'entities' | 'state_kind'>,
+  ): void {
     const rid = (selectRowid.get(id) as { rowid: number }).rowid;
     ftsDelete.run(rid);
     indexItem(rid, item);
@@ -887,6 +956,7 @@ export function createItemsRepo(db: DB) {
       );
       const rid = (selectRowid.get(id) as { rowid: number }).rowid;
       ftsDelete.run(rid);
+      embeddingDelete.run(id);
       const fresh = db.prepare('SELECT * FROM context_items WHERE id = ?').get(id) as ItemRow;
       writeVersion(rowToItem(fresh), 'delete', actor);
       return true;
@@ -904,6 +974,7 @@ export function createItemsRepo(db: DB) {
       if (!row) return false;
       const rid = (selectRowid.get(id) as { rowid: number }).rowid;
       ftsDelete.run(rid);
+      embeddingDelete.run(id);
       db.prepare('DELETE FROM insight_evidence WHERE insight_id = ? OR evidence_id = ?').run(id, id);
       db.prepare('DELETE FROM item_versions WHERE item_id = ?').run(id);
       db.prepare('DELETE FROM item_reviews WHERE item_id = ?').run(id);
@@ -1085,23 +1156,47 @@ export function createItemsRepo(db: DB) {
   }
 
   /**
-   * Hybrid-ranked full-text search: per-query bm25 candidates fused with RRF,
-   * weighted by lifecycleFactor. LIKE substring fallback when FTS is empty.
+   * v6 hybrid retrieval. Every candidate source embeds applyFilters() in its
+   * SQL before ranking, then weighted RRF combines lexical, local-vector and
+   * entity matches. The vector table is never queried as an authority.
    */
   function search(
     access: ReadAccess,
     opts: SearchOptions,
-  ): { items: SearchResultItem[]; fullItems: ContextItem[]; totalMatched: number } {
+  ): {
+    items: SearchResultItem[];
+    fullItems: ContextItem[];
+    totalMatched: number;
+    retrieval: RetrievalDiagnostics;
+  } {
+    const started = performance.now();
     const nowIso = new Date().toISOString();
     const nowMs = Date.now();
-    const fused = new Map<string, { item: ContextItem; rrf: number }>();
+    // Repository callers retain the v5 lexical default unless the domain
+    // command/compiler explicitly opts into v6 hybrid retrieval.
+    const mode = opts.mode ?? 'lexical';
+    type CandidateSource = 'lexical' | 'vector' | 'entity';
+    const fused = new Map<
+      string,
+      { item: ContextItem; rrf: number; sources: Set<CandidateSource> }
+    >();
+    const sourceIds: Record<CandidateSource, Set<string>> = {
+      lexical: new Set(),
+      vector: new Set(),
+      entity: new Set(),
+    };
 
-    function accumulate(rows: ItemRow[]): void {
+    function accumulate(rows: ItemRow[], source: CandidateSource, weight: number): void {
       rows.forEach((row, i) => {
+        sourceIds[source].add(row.id);
         const entry = fused.get(row.id);
-        const contribution = 1 / (RRF_K + i + 1);
-        if (entry) entry.rrf += contribution;
-        else fused.set(row.id, { item: rowToItem(row), rrf: contribution });
+        const contribution = weight / (RRF_K + i + 1);
+        if (entry) {
+          entry.rrf += contribution;
+          entry.sources.add(source);
+        } else {
+          fused.set(row.id, { item: rowToItem(row), rrf: contribution, sources: new Set([source]) });
+        }
       });
     }
 
@@ -1120,13 +1215,15 @@ export function createItemsRepo(db: DB) {
                ORDER BY bm25(items_fts, 3.0, 1.0, 2.0) LIMIT ?`,
             )
             .all(...params, FTS_CANDIDATES) as ItemRow[],
+          'lexical',
+          1,
         );
       } catch {
         continue; // malformed FTS syntax after sanitization — skip this query
       }
     }
 
-    if (fused.size === 0) {
+    if (sourceIds.lexical.size === 0) {
       for (const q of opts.queries) {
         const trimmed = q.trim();
         if (!trimmed) continue;
@@ -1140,20 +1237,102 @@ export function createItemsRepo(db: DB) {
           db
             .prepare(`SELECT i.* FROM context_items i WHERE ${where.join(' AND ')} ORDER BY i.id DESC LIMIT ?`)
             .all(...params, LIKE_CANDIDATES) as ItemRow[],
+          'lexical',
+          0.9,
         );
+      }
+    }
+
+    if (mode === 'hybrid') {
+      for (const q of opts.queries) {
+        if (!q.trim()) continue;
+        const queryVector = embeddingProvider.embedQuery(q);
+        if (queryVector.length !== embeddingProvider.dimensions) {
+          throw new Error(
+            `embedding provider ${embeddingProvider.model} returned ${queryVector.length} dimensions; expected ${embeddingProvider.dimensions}`,
+          );
+        }
+        const hasSignal = queryVector.some((value) => value !== 0);
+        if (!hasSignal) continue;
+        const where: string[] = [
+          'e.model = ?',
+          'e.dimensions = ?',
+        ];
+        const vectorBlob = Buffer.from(queryVector.buffer, queryVector.byteOffset, queryVector.byteLength);
+        const params: unknown[] = [vectorBlob, embeddingProvider.model, embeddingProvider.dimensions];
+        applyFilters(where, params, opts.filters, nowIso, access, opts.surface);
+        const rows = db
+          .prepare(
+            `SELECT ranked.* FROM (
+               SELECT i.*, vec_distance_cosine(e.embedding, ?) AS vector_distance
+               FROM item_embeddings e JOIN context_items i ON i.id = e.item_id
+               WHERE ${where.join(' AND ')}
+             ) ranked
+             WHERE ranked.vector_distance <= ?
+             ORDER BY ranked.vector_distance, ranked.id DESC
+             LIMIT ?`,
+          )
+          .all(...params, MAX_VECTOR_DISTANCE, VECTOR_CANDIDATES) as ItemRow[];
+        accumulate(rows, 'vector', 0.85);
+      }
+
+      const inferredTerms = opts.queries.flatMap(
+        (q) => q.normalize('NFKC').toLocaleLowerCase().match(/[\p{L}\p{N}_:-]{2,}/gu) ?? [],
+      );
+      const entityTerms = [...new Set([...(opts.entities ?? []), ...inferredTerms])].slice(0, 20);
+      for (const term of entityTerms) {
+        const normalized = term.normalize('NFKC').toLocaleLowerCase().trim();
+        if (!normalized) continue;
+        const escaped = normalized.replace(/[\\%_]/g, (char) => `\\${char}`);
+        const where: string[] = [
+          `EXISTS (
+             SELECT 1 FROM json_each(i.entities) entity
+             WHERE lower(entity.value) = ? OR lower(entity.value) LIKE ? ESCAPE '\\'
+           )`,
+        ];
+        const params: unknown[] = [normalized, `%${escaped}%`];
+        applyFilters(where, params, opts.filters, nowIso, access, opts.surface);
+        const rows = db
+          .prepare(
+            `SELECT i.* FROM context_items i
+             WHERE ${where.join(' AND ')}
+             ORDER BY COALESCE(i.last_verified_at, i.occurred_at, i.updated_at) DESC
+             LIMIT ?`,
+          )
+          .all(...params, ENTITY_CANDIDATES) as ItemRow[];
+        accumulate(rows, 'entity', 0.95);
       }
     }
 
     const tokens = opts.queries.flatMap((q) => q.trim().split(/\s+/)).filter(Boolean);
     const scored = [...fused.values()]
-      .map(({ item, rrf }) => ({ item, score: rrf * lifecycleFactor(item, nowMs) }))
+      .map(({ item, rrf, sources }) => ({
+        item,
+        sources,
+        score: rrf * lifecycleFactor(item, nowMs),
+      }))
       .sort((a, b) => b.score - a.score);
     const offset = opts.offset ?? 0;
     const top = scored.slice(offset, offset + opts.limit);
     return {
-      items: top.map(({ item, score }) => ({ ...toCompact(item, tokens), score: Number(score.toFixed(6)) })),
+      items: top.map(({ item, score, sources }) => ({
+        ...toCompact(item, tokens),
+        score: Number(score.toFixed(6)),
+        retrieval_sources: [...sources],
+      })),
       fullItems: top.map(({ item }) => item),
       totalMatched: fused.size,
+      retrieval: {
+        mode,
+        embedding_model: mode === 'hybrid' ? embeddingProvider.model : null,
+        candidate_counts: {
+          lexical: sourceIds.lexical.size,
+          vector: sourceIds.vector.size,
+          entity: sourceIds.entity.size,
+          fused: fused.size,
+        },
+        elapsed_ms: Number((performance.now() - started).toFixed(3)),
+      },
     };
   }
 
@@ -1440,25 +1619,63 @@ export function createItemsRepo(db: DB) {
     })();
   }
 
-  /**
-   * Rebuild the FTS index from the base table. The index is a projection —
-   * this is the ONLY thing needed to recover it, and it is MANDATORY after a
-   * snapshot restore (implicit rowids may be renumbered by VACUUM).
-   */
-  function reindex(): { indexed: number } {
-    return db.transaction((): { indexed: number } => {
+  /** Rebuild every retrieval projection from authoritative context_items. */
+  function reindex(): { indexed: number; vectorIndexed: number } {
+    return db.transaction((): { indexed: number; vectorIndexed: number } => {
       db.exec('DELETE FROM items_fts');
+      db.exec('DELETE FROM item_embeddings');
       const rows = db
         .prepare(
-          `SELECT rowid, title, content, tags FROM context_items
+          `SELECT rowid, id, title, content, tags, entities, state_kind FROM context_items
            WHERE deleted = 0 AND (state_kind IS NULL OR state_kind != 'operational')`,
         )
-        .all() as { rowid: number; title: string; content: string; tags: string }[];
+        .all() as {
+        rowid: number;
+        id: string;
+        title: string;
+        content: string;
+        tags: string;
+        entities: string;
+        state_kind: StateKind | null;
+      }[];
       for (const r of rows) {
-        ftsInsert.run(r.rowid, segmentCjk(r.title), segmentCjk(r.content), segmentCjk(JSON.parse(r.tags).join(' ')));
+        indexItem(r.rowid, {
+          ...r,
+          tags: JSON.parse(r.tags) as string[],
+          entities: JSON.parse(r.entities) as string[],
+        });
       }
-      return { indexed: rows.length };
+      return { indexed: rows.length, vectorIndexed: rows.length };
     })();
+  }
+
+  function retrievalProjectionStatus(): RetrievalProjectionStatus {
+    const authoritative = db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM context_items
+         WHERE deleted = 0 AND (state_kind IS NULL OR state_kind != 'operational')`,
+      )
+      .get() as { n: number };
+    const indexed = db
+      .prepare(
+        `SELECT COUNT(*) AS n
+         FROM item_embeddings e JOIN context_items i ON i.id = e.item_id
+         WHERE i.deleted = 0
+           AND (i.state_kind IS NULL OR i.state_kind != 'operational')
+           AND e.model = ? AND e.dimensions = ?`,
+      )
+      .get(embeddingProvider.model, embeddingProvider.dimensions) as { n: number };
+    const version = db.prepare('SELECT vec_version() AS version').get() as { version: string };
+    const missing = Math.max(0, authoritative.n - indexed.n);
+    return {
+      vector_extension_version: version.version,
+      embedding_model: embeddingProvider.model,
+      dimensions: embeddingProvider.dimensions,
+      authoritative_items: authoritative.n,
+      indexed_items: indexed.n,
+      missing_items: missing,
+      ready: missing === 0,
+    };
   }
 
   return {
@@ -1480,5 +1697,6 @@ export function createItemsRepo(db: DB) {
     getStateByKey,
     upsertOperationalState,
     reindex,
+    retrievalProjectionStatus,
   };
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end verification for ContextHub v5.
+# End-to-end verification for ContextHub v6.
 # Builds, seeds demo data, mints namespace-bound keys, boots the server,
 # exercises REST + MCP over real HTTP (including cross-interface
 # read-after-write and namespace isolation), then backs up, restores to a
@@ -108,7 +108,9 @@ SNAPSHOT=$(ls -t "$E2E_DATA"/backups/contexthub-*.db | head -1)
 mkdir -p "$RESTORE_DATA"
 cp "$SNAPSHOT" "$RESTORE_DATA/contexthub.db"
 export DATA_DIR="$RESTORE_DATA"
-npm run cli -- reindex   # MANDATORY after restore (FTS rowids are not trusted)
+npm run cli -- reindex   # MANDATORY after restore (all retrieval projections are rebuildable)
+RETRIEVAL_STATUS=$(npm run cli -- retrieval-status 2>&1)
+check "restored retrieval projections are complete" '"ready": true' "$RETRIEVAL_STATUS"
 RESTORED_OUTCOMES=$(node -e 'const Database=require("better-sqlite3"); const db=new Database(process.env.DATA_DIR+"/contexthub.db",{readonly:true}); console.log(db.prepare("SELECT COUNT(*) AS n FROM context_outcomes").get().n); db.close()')
 check "restored hub keeps context outcome feedback" '1' "$RESTORED_OUTCOMES"
 node dist/index.js >/tmp/contexthub-e2e-restore.log 2>&1 &

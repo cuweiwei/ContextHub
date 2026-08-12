@@ -9,7 +9,7 @@ import { createItemsRepo } from '../src/core/items-repo.js';
 import { createPoliciesRepo } from '../src/core/policies-repo.js';
 import { newItemSchema } from '../src/core/types.js';
 import { acquireInstanceLock, openDatabase, type DB } from '../src/db/connection.js';
-import { ADMIN_CLIENT, ADMIN_ACCESS, idem } from './helpers.js';
+import { ACCEPT_TRUST, ADMIN_CLIENT, ADMIN_ACCESS, idem, writerFor } from './helpers.js';
 
 function stack(db: DB) {
   const itemsRepo = createItemsRepo(db);
@@ -88,10 +88,47 @@ describe('backup / restore / reindex on a real file database', () => {
     // reopen: no pending migrations → no error, no extra backup
     const db2 = openDatabase(dbFile);
     const migrations = db2.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get() as { n: number };
-    expect(migrations.n).toBe(6);
+    expect(migrations.n).toBe(7);
     db2.close();
     const backups = fs.existsSync(path.join(dir, 'backups')) ? fs.readdirSync(path.join(dir, 'backups')) : [];
     expect(backups.filter((f) => f.startsWith('pre-migration'))).toHaveLength(0); // fresh DB → no upgrade backup
+  });
+
+  it('snapshots a v6 database before migration v7 and restores plus reindexes that snapshot', () => {
+    const dbFile = path.join(dir, 'upgrade.db');
+    const db = openDatabase(dbFile);
+    const repo = createItemsRepo(db);
+    const saved = repo.insert(
+      writerFor('upgrade-source'),
+      newItemSchema.parse({
+        type: 'note',
+        title: 'migration vector recovery marker',
+        idempotency_key: 'upgrade-marker',
+      }),
+      'app',
+      ACCEPT_TRUST,
+    ).item;
+    // Simulate the exact schema state immediately before migration v7.
+    db.exec('DROP TABLE item_embeddings; DELETE FROM schema_migrations WHERE version = 7');
+    db.close();
+
+    const upgraded = openDatabase(dbFile);
+    const upgradeBackups = fs
+      .readdirSync(path.join(dir, 'backups'))
+      .filter((name) => name.startsWith('pre-migration-v7-'));
+    expect(upgradeBackups).toHaveLength(1);
+    upgraded.close();
+
+    const preMigrationSnapshot = path.join(dir, 'backups', upgradeBackups[0]!);
+    const restoredFile = path.join(dir, 'restored-v6.db');
+    fs.copyFileSync(preMigrationSnapshot, restoredFile);
+    const restored = openDatabase(restoredFile);
+    const restoredRepo = createItemsRepo(restored);
+    expect(restoredRepo.retrievalProjectionStatus()).toMatchObject({ ready: false, missing_items: 1 });
+    restoredRepo.reindex();
+    expect(restoredRepo.retrievalProjectionStatus()).toMatchObject({ ready: true, indexed_items: 1 });
+    expect(restoredRepo.get(ADMIN_ACCESS, saved.id)?.title).toBe('migration vector recovery marker');
+    restored.close();
   });
 
   it('the instance lock refuses a second writer on the same data dir', () => {

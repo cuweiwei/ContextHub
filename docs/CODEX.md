@@ -35,7 +35,8 @@ read-only until post-migration verification succeeds.
 
 ## Create one Codex identity per namespace
 
-Run these on the NAS after the v5 container is deployed:
+Run these on the NAS after the v6 container is deployed and `reindex` plus
+`retrieval-status` report complete projection coverage:
 
 ```bash
 docker exec contexthub node dist/cli.js create-client \

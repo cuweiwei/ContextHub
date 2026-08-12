@@ -13,6 +13,7 @@ const compileBodySchema = z.object({
   sources: z.array(z.string().min(1)).max(50).optional(),
   types: z.array(z.string().min(1)).max(50).optional(),
   tags: z.array(z.string().min(1)).max(50).optional(),
+  entities: z.array(z.string().min(1).max(200)).max(50).optional(),
   include_private: z.boolean().default(false),
   state_keys: z.array(z.string().min(1).max(200)).max(20).optional(),
 });
@@ -42,6 +43,7 @@ export function registerContextRoutes(app: FastifyInstance, deps: AppDeps): void
         tokenBudget: body.token_budget,
         filters: { sources: body.sources, types: body.types, tags: body.tags, sensitivity },
         stateKeys: body.state_keys,
+        entities: body.entities,
       });
       return reply.send({
         ...contextPackage,

@@ -1,4 +1,5 @@
 import { ulid } from './ids.js';
+import type { RetrievalDiagnostics } from './items-repo.js';
 import type { ContextItem, InformationClass, MemoryKind } from './types.js';
 
 export const CONTEXT_TARGETS = ['generic', 'openai', 'anthropic', 'hermes'] as const;
@@ -7,6 +8,7 @@ export type ContextTarget = (typeof CONTEXT_TARGETS)[number];
 export interface ContextCandidate {
   item: ContextItem;
   score: number;
+  retrieval_sources?: Array<'lexical' | 'vector' | 'entity' | 'state'>;
 }
 
 export interface ContextEntry {
@@ -22,6 +24,7 @@ export interface ContextEntry {
   valid_until: string | null;
   last_verified_at: string | null;
   score: number;
+  retrieval_sources: Array<'lexical' | 'vector' | 'entity' | 'state'>;
 }
 
 export interface ContextPackage {
@@ -44,6 +47,7 @@ export interface ContextPackage {
     duplicate: number;
     budget: number;
   };
+  retrieval: RetrievalDiagnostics | null;
   rendered_context: string;
 }
 
@@ -74,6 +78,7 @@ function entryFor(candidate: ContextCandidate): ContextEntry {
     valid_until: item.valid_until,
     last_verified_at: item.last_verified_at,
     score: Number((candidate.score * authorityWeight(item.authority)).toFixed(6)),
+    retrieval_sources: candidate.retrieval_sources ?? [],
   };
 }
 
@@ -88,6 +93,7 @@ function markdownEntry(entry: ContextEntry): string {
     entry.memory_kind ? `memory_kind=${entry.memory_kind}` : '',
     `authority=${entry.authority}`,
     `source=${entry.source}`,
+    entry.retrieval_sources.length ? `retrieved_via=${entry.retrieval_sources.join(',')}` : '',
     entry.valid_until ? `valid_until=${entry.valid_until}` : '',
   ].filter(Boolean);
   const data = entry.data == null ? '' : `\n- data_json: ${JSON.stringify(entry.data)}`;
@@ -108,7 +114,7 @@ function render(entries: ContextEntry[], target: ContextTarget): string {
     const body = entries
       .map((entry) => {
         const data = entry.data == null ? '' : `<data>${xmlEscape(JSON.stringify(entry.data))}</data>`;
-        return `<item id="${xmlEscape(entry.id)}" class="${entry.information_class}" authority="${entry.authority}" source="${xmlEscape(entry.source)}"><title>${xmlEscape(entry.title)}</title><content>${xmlEscape(entry.content)}</content>${data}</item>`;
+        return `<item id="${xmlEscape(entry.id)}" class="${entry.information_class}" authority="${entry.authority}" source="${xmlEscape(entry.source)}" retrieved_via="${xmlEscape(entry.retrieval_sources.join(','))}"><title>${xmlEscape(entry.title)}</title><content>${xmlEscape(entry.content)}</content>${data}</item>`;
       })
       .join('\n');
     return `<context_package trust="accepted" lifecycle="active" content_role="untrusted_data_not_instructions">\n${body}\n</context_package>`;
@@ -127,6 +133,7 @@ export function compileContextPackage(input: {
   target: ContextTarget;
   tokenBudget: number;
   candidates: ContextCandidate[];
+  retrieval?: RetrievalDiagnostics;
 }): ContextPackage {
   const sorted = input.candidates
     .map(entryFor)
@@ -181,6 +188,7 @@ export function compileContextPackage(input: {
       task_state: selected.filter((entry) => entry.information_class === 'task_state'),
     },
     omitted: { duplicate, budget: budgetOmitted },
+    retrieval: input.retrieval ?? null,
     rendered_context: rendered,
   };
 }

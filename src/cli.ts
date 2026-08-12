@@ -15,7 +15,8 @@
  *   npm run cli -- review --id 01K... --action accept|reject|revoke --revision <n> [--note "..."]
  *   npm run cli -- candidates [--namespace personal] [--limit 20]
  *   npm run cli -- audit [--namespace work] [--limit 50]
- *   npm run cli -- reindex          # rebuild FTS from the base table (MANDATORY after restore)
+ *   npm run cli -- reindex          # rebuild FTS + vectors (MANDATORY after restore/upgrade)
+ *   npm run cli -- retrieval-status # vector extension/model/index coverage
  *   npm run cli -- backup [--out /data/backups]
  *   npm run cli -- purge --id 01K...
  *   npm run cli -- idempotency-gc [--days 90]
@@ -319,8 +320,14 @@ function main(): void {
       break;
     }
     case 'reindex': {
-      const { indexed } = itemsRepo.reindex();
-      console.log(`FTS index rebuilt from base table: ${indexed} items indexed`);
+      const { indexed, vectorIndexed } = itemsRepo.reindex();
+      console.log(
+        `retrieval projections rebuilt from base table: FTS=${indexed}, vectors=${vectorIndexed}`,
+      );
+      break;
+    }
+    case 'retrieval-status': {
+      console.log(JSON.stringify(itemsRepo.retrievalProjectionStatus(), null, 2));
       break;
     }
     case 'backup': {
@@ -376,7 +383,7 @@ function main(): void {
     }
     default:
       console.error(
-        'commands: create-client | list-clients | rotate-key | disable-client | create-namespace | policy-show | policy-apply | register-state-schema | review | candidates | audit | reindex | backup | purge | idempotency-gc | seed-demo',
+        'commands: create-client | list-clients | rotate-key | disable-client | create-namespace | policy-show | policy-apply | register-state-schema | review | candidates | audit | reindex | retrieval-status | backup | purge | idempotency-gc | seed-demo',
       );
       process.exit(1);
   }

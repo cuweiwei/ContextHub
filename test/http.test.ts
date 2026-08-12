@@ -45,6 +45,11 @@ describe('REST API', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json().status).toBe('ok');
     expect(res.json().audit_writable).toBe(true);
+    expect(res.json().retrieval_projection).toMatchObject({
+      vector_extension_version: 'v0.1.9',
+      embedding_model: 'local-feature-hash-v1',
+      ready: true,
+    });
   });
 
   it('serves a no-store reviewer UI without embedding credentials', async () => {
