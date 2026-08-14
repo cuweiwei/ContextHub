@@ -397,10 +397,14 @@ overall_migration_status: partial
 
 - 記憶總覽：`http://<NAS_TAILSCALE_IP>:8788/explore`
 - Candidate 審核台：`http://<NAS_TAILSCALE_IP>:8788/review`
+- Control Center（已啟用時）：`https://<NAS_TAILSCALE_NAME>:8443/dashboard`
 
 兩個頁面都使用 namespace 專屬的 human reviewer key；key 只保存在目前頁面的 JavaScript
 記憶體，不寫入 localStorage。`/explore` 只顯示這把 key 經 policy 授權可讀的 accepted
 items；`/review` 顯示同 namespace 的 candidate inbox。
+
+Control Center 使用 Tailscale identity 建立短期 Web session，不要求貼 reviewer key；但仍必須
+先 link 對應 namespace 的 human reviewer client，才能查看或審核 Memory。
 
 如果畫面沒有資料，依序檢查：
 

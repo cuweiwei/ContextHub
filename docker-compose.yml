@@ -7,7 +7,9 @@ services:
     ports:
       # Fail-safe default: publish only on NAS loopback. On Synology, expose
       # this to the tailnet with `tailscale serve --tcp=8788
-      # tcp://127.0.0.1:8788`; never bind 0.0.0.0 or the NAS public IPv4.
+      # tcp://127.0.0.1:8788`. Control Center uses a separate HTTPS Serve
+      # listener, e.g. `tailscale serve --https=8443
+      # http://127.0.0.1:8788`; never bind 0.0.0.0 or the NAS public IPv4.
       - "${CONTEXTHUB_BIND_ADDRESS:-127.0.0.1}:${CONTEXTHUB_HOST_PORT:-8788}:8787"
     environment:
       # Generate with: openssl rand -base64 32  (put it in a .env file next to

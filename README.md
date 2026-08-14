@@ -89,11 +89,16 @@ cp .env.example .env
 docker compose up -d --build
 
 # Synology Tailscale 預設 userspace networking，Docker 不應直接綁 100.x IP。
-# 在 NAS 上用 Tailscale Serve 把 tailnet 的 8788/TCP 轉到 loopback：
+# Data plane：讓 MCP 與 legacy key 介面走 tailnet 的 8788/TCP：
 sudo /var/packages/Tailscale/target/bin/tailscale serve \
   --bg --yes --tcp=8788 tcp://127.0.0.1:8788
+# Control Center：另用 HTTPS 8443，讓 Tailscale identity headers 可建立 Web session。
+# 若 NAS 的 443 已由其他服務（例如 Hermes）使用，不要改動 443。
+sudo /var/packages/Tailscale/target/bin/tailscale serve \
+  --bg --yes --https=8443 http://127.0.0.1:8788
 
 curl http://<nas-tailscale-ip>:8788/health   # {"status":"ok","audit_writable":true,...}
+curl -k https://<nas-tailscale-name>:8443/health
 docker compose exec contexthub node dist/cli.js reindex
 docker compose exec contexthub node dist/cli.js retrieval-status
 ```
@@ -135,13 +140,13 @@ Control Center 是 feature-flagged 的人類管理平面：`/dashboard`、`/memo
 先在 NAS 以 CLI bootstrap：
 
 ```bash
-docker compose exec contexthub node dist/cli.js web-principal-add \
+docker exec contexthub node dist/cli.js web-principal-add \
   --provider tailscale --subject <TAILSCALE_USER_LOGIN> --name "Owner" --control-admin
-docker compose exec contexthub node dist/cli.js web-principal-link \
+docker exec contexthub node dist/cli.js web-principal-link \
   --subject <TAILSCALE_USER_LOGIN> --client tim-reviewer-personal
 ```
 
-只有在 Tailscale HTTPS reverse proxy 已配置後才開啟 `CONTROL_CENTER_ENABLED=true`、`CONTROL_CENTER_TAILSCALE_AUTH_ENABLED=true`、`CONTROL_CENTER_TRUSTED_PROXY=true`，並填入 `CONTROL_CENTER_CANONICAL_ORIGIN=https://<tailnet-host>`。Enrollment 預設關閉；開啟 `AGENT_ENROLLMENT_ENABLED=true` 後，Agents 頁面可產生 single-use code，agent 透過 `/v1/agent-enrollment/exchange` 取得一次性 raw key。MCP OAuth 目前只保留 configuration 接縫，未經實測不宣稱支援；`LEGACY_API_KEYS_ENABLED=true` 是相容 fallback。
+管理頁網址是 `https://<nas-tailscale-name>:8443/dashboard`；請使用 Tailscale DNS 名稱，不要用 `https://<tailscale-ip>:8443` 取代，因為 HTTPS 憑證與 identity proxy 都以 tailnet hostname 為準。只有在 Tailscale HTTPS reverse proxy 已配置後才開啟 `CONTROL_CENTER_ENABLED=true`、`CONTROL_CENTER_TAILSCALE_AUTH_ENABLED=true`、`CONTROL_CENTER_TRUSTED_PROXY=true`，並填入 `CONTROL_CENTER_CANONICAL_ORIGIN=https://<tailnet-host>:8443`。Enrollment 預設關閉；開啟 `AGENT_ENROLLMENT_ENABLED=true` 後，Agents 頁面可產生 single-use code，agent 透過 `/v1/agent-enrollment/exchange` 取得一次性 raw key。MCP OAuth 目前只保留 configuration 接縫，未經實測不宣稱支援；`LEGACY_API_KEYS_ENABLED=true` 是相容 fallback。
 
 18 個工具。讀取面：`compile_context`（依 intent、有效期、authority/freshness、ACL 與 token budget 產生短暫 package）、`search_context`（預設 hybrid：FTS5 + 本地向量 + structured entity，weighted RRF；結果帶 retrieval diagnostics、information_class/memory_kind/authority/trust_state）、`get_current_context`、`get_recent_context`、`get_context_item`、`get_context_brief`、`list_context_sources`、`get_memory_history`（版本＋裁決史）、`my_candidates`（自己的待審）。
 
@@ -163,10 +168,13 @@ npm run cli -- review --id 01K... --action revoke --revision 3 --note "已不成
 npm run cli -- audit --namespace work --limit 50   # 稽核軌(讀/寫/拒絕/管理)
 ```
 
-Human reviewer 可從 Tailscale 私網開啟 `http://<NAS_TAILSCALE_IP>:8788/review`，
+Human reviewer 若使用 legacy data plane，可從 Tailscale 私網開啟 `http://<NAS_TAILSCALE_IP>:8788/review`，
 貼上該 namespace 的 reviewer key 進行 inbox、歷史、接受與拒絕操作；key 只留在當前頁面的記憶體，
 不會寫入 localStorage。REST 介面仍是 `POST /v1/items/:id/review`。被拒的提案 agent 可用 id
 讀到 `review_note`;接受 successor 會原子地把舊記憶標為 superseded(裁決寫回 hub)。
+
+已啟用 Control Center 時，日常管理請改用
+`https://<nas-tailscale-name>:8443/dashboard`，由 Tailscale identity 登入，不需要貼 reviewer key。
 
 已接受的內容可從 `http://<NAS_TAILSCALE_IP>:8788/explore` 視覺化查看：來源與類型分布、
 搜尋／篩選、完整內容與 provenance。此頁同樣使用 namespace 專屬的 read/reviewer key，
@@ -186,7 +194,8 @@ src/
            #   items-repo(applyFilters:namespace+trust+ACL+validity)、policy/policies-repo、audit-repo、
            #   local-embedding(pluggable on-device provider)、clients-repo、canonical、cjk、errors
   http/    # Fastify:auth + /v1 routes(items/candidates/review/task-op/curate/state/
-           #   history/audit/policies/clients/namespaces)+ /explore + /review + health
+           #   history/audit/policies/clients/namespaces)+ /explore + /review
+           #   + Control Center + health
   mcp/     # MCP server(18 tools)+ Streamable HTTP 掛載(stateless,一 key 一 namespace)
   db/      # SQLite+sqlite-vec 連線(synchronous=FULL、instance lock)+ migrations(v1–v8)
   cli.ts   # create-client/.../reindex/retrieval-status/backup/purge/...

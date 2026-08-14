@@ -22,12 +22,19 @@ ContextHub 把不同 AI 工具需要的來源摘要與長期記憶放在同一�
 
 1. 一台已加入相同 Tailscale 帳號（tailnet）的裝置。
 2. NAS 上正在運行的 ContextHub。
-3. 屬於正確記憶空間的 **reviewer key**。
+3. 如果使用 legacy `/explore`、`/review`，需要屬於正確記憶空間的 **reviewer key**；
+   使用 Control Center 則由 Tailscale identity 登入，不需貼 key。
 
-ContextHub 的網址格式是：
+ContextHub 的 data plane 網址格式是：
 
 ```text
 http://<NAS_TAILSCALE_IP>:8788
+```
+
+如果已啟用 Control Center，管理頁使用獨立的 Tailscale HTTPS 入口：
+
+```text
+https://<NAS_TAILSCALE_NAME>:8443/dashboard
 ```
 
 常用入口：
@@ -37,6 +44,7 @@ http://<NAS_TAILSCALE_IP>:8788
 | 查看正式 Source／Memory | `http://<NAS_TAILSCALE_IP>:8788/explore` |
 | 審核 AI 提案 | `http://<NAS_TAILSCALE_IP>:8788/review` |
 | 確認服務正常 | `http://<NAS_TAILSCALE_IP>:8788/health` |
+| Control Center 管理頁 | `https://<NAS_TAILSCALE_NAME>:8443/dashboard` |
 
 Reviewer key 相當於密碼。請保存在密碼管理器或系統鑰匙圈，不要放進聊天、
 文件、截圖、Git repository 或 AI 的設定說明中。日常使用不需要
@@ -44,7 +52,11 @@ Reviewer key 相當於密碼。請保存在密碼管理器或系統鑰匙圈，�
 
 ### Control Center 登入
 
-若管理者已啟用 Control Center，請從 Tailscale HTTPS 網址開啟 `/dashboard`。登入身分由 Tailscale identity headers 辨識，不需要貼 reviewer key；session 是短期 HttpOnly cookie，可由管理者撤銷。Control admin 只代表能管理 Agent／設定，不代表能讀取任何 namespace；要查看或審核 Memory，必須另外 link 對應 namespace 的 human reviewer client。
+若管理者已啟用 Control Center，請從 Tailscale DNS 名稱的 HTTPS 入口開啟
+`https://<NAS_TAILSCALE_NAME>:8443/dashboard`。不要把 IP 直接放進 HTTPS 網址；登入身分由
+Tailscale identity headers 辨識，不需要貼 reviewer key；session 是短期 HttpOnly cookie，可由管理者撤銷。
+Control admin 只代表能管理 Agent／設定，不代表能讀取任何 namespace；要查看或審核 Memory，必須另外
+link 對應 namespace 的 human reviewer client。
 
 Agents 頁面可建立單次 enrollment。code 只在建立時顯示一次，交給受支援的 agent-side helper 交換；不要把 code 或交換後的 `chk_` key 貼進聊天、Git、截圖或網址。若 client 不支援 enrollment，暫時使用既有 legacy key，並在完成遷移前保持 `LEGACY_API_KEYS_ENABLED=true`。
 
@@ -175,8 +187,9 @@ ContextHub 使用不同的 namespace 隔離資料：
 
 1. 裝置已連上 Tailscale。
 2. NAS 在 Tailscale 中顯示上線。
-3. 網址使用 NAS 的 Tailscale IP 與 `8788` 連接埠。
-4. `/health` 是否顯示 `"status":"ok"`。
+3. `/explore`、`/review` 或 MCP data plane 使用 NAS 的 Tailscale IP 與 `8788` 連接埠。
+4. `/dashboard` 使用 NAS 的 Tailscale DNS 名稱與 HTTPS `8443` 連接埠。
+5. `/health` 是否顯示 `"status":"ok"`。
 
 不需要改用 NAS 公網 IP，也不要為此設定路由器 port forwarding 或 DMZ。
 

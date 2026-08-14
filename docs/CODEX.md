@@ -19,13 +19,24 @@ sudo /var/packages/Tailscale/target/bin/tailscale serve \
   --bg --yes --tcp=8788 tcp://127.0.0.1:8788
 ```
 
+若要啟用 Control Center，另建立 Tailscale HTTPS reverse proxy；不要佔用已由其他 NAS
+服務使用的 443：
+
+```bash
+sudo /var/packages/Tailscale/target/bin/tailscale serve \
+  --bg --yes --https=8443 http://127.0.0.1:8788
+```
+
 The MCP URL exposed to tailnet devices is:
 
 ```text
 http://<nas-tailscale-name-or-ip>:8788/mcp
 ```
 
-ContextHub currently serves HTTP. Tailscale supplies the private encrypted network boundary; do not send its bearer tokens over untrusted public HTTP.
+ContextHub data plane currently serves HTTP behind the private Tailscale boundary; do not send its
+bearer tokens over untrusted public HTTP. The human Control Center uses the separate HTTPS endpoint
+`https://<nas-tailscale-name>:8443/dashboard`; use the Tailscale DNS name rather than the IP for
+certificate and identity-proxy compatibility.
 
 當 Control Center 已配置 Tailscale Serve HTTPS 時，Web 管理入口使用 `/dashboard`，不再輸入 reviewer key。MCP data plane 仍可暫時使用 namespace-scoped legacy key；personal 與 work credential 必須保持在不同的 Codex project/profile。OAuth pilot 尚未完成 client 實測前不可預填 OAuth 設定，請保留 legacy fallback。
 

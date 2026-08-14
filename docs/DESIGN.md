@@ -264,7 +264,7 @@ docker compose exec contexthub node dist/cli.js retrieval-status # ready 必須�
 | Entity 圖譜 traversal | v6 已有 entity candidate source；後續增加 canonical nodes/edges 與 bounded traversal |
 | insight-as-evidence | 需 recursive CTE evidence closure + 環檢測 |
 | Tamper-evident audit(hash chain) | audit_log append-only 已就緒 |
-| Human UI | `/explore` 提供 accepted 記憶總覽；`/review` 提供 candidates/history/accept/reject；後續可加批次審核與登入整合 |
+| Human UI | `/explore` 與 `/review` 保留 reviewer-key legacy 入口；Control Center 透過 Tailscale HTTPS identity 提供 `/dashboard`、namespace、policy、audit 與設定管理；後續可加批次審核 |
 | 訂閱/推播 | 單一寫入路徑(commands)易掛 hook |
 | Memory consolidation suggestions | 以 outcome ledger + similarity 找候選 merge/successor；仍需 human review |
 | Runtime-input adapter | 可選擇把不持久化的 instructions/tool outputs 納入同一次 budget；預設仍由 agent runtime 組裝 |
