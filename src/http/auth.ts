@@ -44,10 +44,12 @@ export function resolveClient(
   req: FastifyRequest,
   clientsRepo: ClientsRepo,
   adminToken: string | undefined,
+  legacyApiKeysEnabled = true,
 ): ClientAuth | null {
   const token = extractBearer(req);
   if (!token) return null;
   if (adminToken && safeEqual(token, adminToken)) return ADMIN_CLIENT;
+  if (!legacyApiKeysEnabled) return null;
   return clientsRepo.verifyKey(token);
 }
 

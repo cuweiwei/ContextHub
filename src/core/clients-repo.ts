@@ -34,6 +34,7 @@ interface ClientRow {
   created_at: string;
   disabled: number;
   disabled_at: string | null;
+  auth_method?: 'legacy_key' | 'enrollment_key' | 'oauth_user' | 'oauth_client_credentials';
 }
 
 function rowToInfo(r: ClientRow): ClientInfo {
@@ -48,6 +49,7 @@ function rowToInfo(r: ClientRow): ClientInfo {
     credential_version: r.credential_version,
     created_at: r.created_at,
     disabled: r.disabled === 1,
+    auth_method: r.auth_method ?? 'legacy_key',
   };
 }
 
@@ -115,6 +117,22 @@ export function createClientsRepo(db: DB) {
   function verifyKey(rawKey: string): ClientAuth | null {
     const row = selectByHash.get(hashApiKey(rawKey)) as ClientRow | undefined;
     if (!row) return null;
+    return {
+      id: row.id,
+      name: row.name,
+      principalKind: row.principal_kind,
+      namespace: row.namespace,
+      scopes: JSON.parse(row.scopes) as Scope[],
+      maxSensitivity: row.max_sensitivity,
+      readSources: row.read_sources === null ? null : (JSON.parse(row.read_sources) as string[]),
+      credentialVersion: row.credential_version,
+      isAdmin: false,
+    };
+  }
+
+  function authForId(id: string): ClientAuth | null {
+    const row = selectById.get(id) as ClientRow | undefined;
+    if (!row || row.disabled === 1) return null;
     return {
       id: row.id,
       name: row.name,
@@ -201,5 +219,6 @@ export function createClientsRepo(db: DB) {
     listNamespaces,
     createNamespace,
     namespaceExists,
+    authForId,
   };
 }

@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import type { Config } from '../config.js';
 
 const EXPLORE_HTML = String.raw`<!doctype html>
 <html lang="zh-Hant">
@@ -522,9 +523,10 @@ const EXPLORE_HTML = String.raw`<!doctype html>
 </body>
 </html>`;
 
-export function registerExploreUiRoutes(app: FastifyInstance): void {
-  app.get('/explore', async (_req, reply) =>
-    reply
+export function registerExploreUiRoutes(app: FastifyInstance, config?: Config): void {
+  if (config?.controlCenterEnabled) return;
+  app.get('/explore', async (_req, reply) => {
+    return reply
       .header(
         'Content-Security-Policy',
         "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
@@ -533,6 +535,6 @@ export function registerExploreUiRoutes(app: FastifyInstance): void {
       .header('Referrer-Policy', 'no-referrer')
       .header('X-Content-Type-Options', 'nosniff')
       .type('text/html; charset=utf-8')
-      .send(EXPLORE_HTML),
-  );
+      .send(EXPLORE_HTML);
+  });
 }

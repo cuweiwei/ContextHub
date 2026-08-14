@@ -22,6 +22,12 @@ tailnet，而且只能取得本次工作所需 namespace 的 credential。
 不要要求使用者把 bearer token 貼進對話、repo、`AGENTS.md` 或設定檔。Credential
 應由執行環境的 secret store／環境變數提供。
 
+如果使用者提供一次性 enrollment code，agent 應只把 code 送到
+`/v1/agent-enrollment/exchange`，取得的 raw key 立即交給受信任的 OS secret
+store；不得把 code、key、Authorization header 寫入 log、URL、Git 或對話。
+Enrollment 是目前的相容方案。MCP OAuth 仍是 feature-flagged pilot，未經
+實測不得假設 client 支援 discovery、PKCE、DCR 或 client credentials。
+
 ## 2. 必須遵守的信任規則
 
 1. 只有 `trust_state=accepted` 的項目可當作共享事實。

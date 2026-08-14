@@ -128,6 +128,21 @@ claude mcp add --transport http contexthub-work http://<nas-tailscale-ip>:8788/m
 Codex 的安全設定、personal/work credential 隔離與 smoke test 見
 [docs/CODEX.md](docs/CODEX.md)。
 
+## Control Center（Tailscale HTTPS）
+
+Control Center 是 feature-flagged 的人類管理平面：`/dashboard`、`/memories`、`/review`、`/agents`、`/namespaces`、`/policies`、`/audit`、`/settings`。它使用 Tailscale Serve 的 identity headers 建立短期、可撤銷的 `HttpOnly; Secure; SameSite=Strict` session；瀏覽器不保存 reviewer key，也不會取得 `ADMIN_TOKEN`。Control admin 與 namespace-scoped human reviewer 是分離的，沒有 linked human client 就不能讀 Memory。
+
+先在 NAS 以 CLI bootstrap：
+
+```bash
+docker compose exec contexthub node dist/cli.js web-principal-add \
+  --provider tailscale --subject <TAILSCALE_USER_LOGIN> --name "Owner" --control-admin
+docker compose exec contexthub node dist/cli.js web-principal-link \
+  --subject <TAILSCALE_USER_LOGIN> --client tim-reviewer-personal
+```
+
+只有在 Tailscale HTTPS reverse proxy 已配置後才開啟 `CONTROL_CENTER_ENABLED=true`、`CONTROL_CENTER_TAILSCALE_AUTH_ENABLED=true`、`CONTROL_CENTER_TRUSTED_PROXY=true`，並填入 `CONTROL_CENTER_CANONICAL_ORIGIN=https://<tailnet-host>`。Enrollment 預設關閉；開啟 `AGENT_ENROLLMENT_ENABLED=true` 後，Agents 頁面可產生 single-use code，agent 透過 `/v1/agent-enrollment/exchange` 取得一次性 raw key。MCP OAuth 目前只保留 configuration 接縫，未經實測不宣稱支援；`LEGACY_API_KEYS_ENABLED=true` 是相容 fallback。
+
 18 個工具。讀取面：`compile_context`（依 intent、有效期、authority/freshness、ACL 與 token budget 產生短暫 package）、`search_context`（預設 hybrid：FTS5 + 本地向量 + structured entity，weighted RRF；結果帶 retrieval diagnostics、information_class/memory_kind/authority/trust_state）、`get_current_context`、`get_recent_context`、`get_context_item`、`get_context_brief`、`list_context_sources`、`get_memory_history`（版本＋裁決史）、`my_candidates`（自己的待審）。
 
 v6 的 `local-feature-hash-v1` 是完全本地、同步、可重現的 384 維 similarity embedding，擅長 typo／字形近似與欄位加權；它不宣稱具備大型神經模型的同義詞理解。embedding provider 可替換成另一個同步 on-device model，而 ACL、domain rows 與 API 不需改變。`item_embeddings` 與 FTS 都只是 projection；SQLite `context_items` 仍是唯一權威。
@@ -173,7 +188,7 @@ src/
   http/    # Fastify:auth + /v1 routes(items/candidates/review/task-op/curate/state/
            #   history/audit/policies/clients/namespaces)+ /explore + /review + health
   mcp/     # MCP server(18 tools)+ Streamable HTTP 掛載(stateless,一 key 一 namespace)
-  db/      # SQLite+sqlite-vec 連線(synchronous=FULL、instance lock)+ migrations(v1–v7)
+  db/      # SQLite+sqlite-vec 連線(synchronous=FULL、instance lock)+ migrations(v1–v8)
   cli.ts   # create-client/.../reindex/retrieval-status/backup/purge/...
 scripts/   # retrieval-benchmark.ts、e2e.sh、restore.sh(NAS runbook)
 test/      # 100+ tests:隔離/信任/政策/稽核 fail-closed/idempotency/一致性/還原邊界

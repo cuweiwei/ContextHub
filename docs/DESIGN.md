@@ -69,6 +69,10 @@ ContextHub 的 compiler 只處理持久資訊與明確要求的 operational stat
 | `/v1/*` | Apps、審核 UI、admin | REST + Bearer API key |
 | `/mcp` | AI agents | MCP Streamable HTTP(stateless)+ Bearer API key |
 | `/health` | 監控 | 免認證;回報 audit 可寫性與磁碟剩餘空間 |
+| `/dashboard`、`/memories`、`/review`、`/agents` | 人類 Control Center | Tailscale HTTPS identity → revocable web session；不接受 ADMIN_TOKEN |
+| `/mcp/:namespace` | canonical MCP resource | legacy key 相容路徑；namespace 必須與 server-side credential 相同 |
+
+Control Center 的 Web principal、session、principal-to-human-client links、agent enrollment 與 activity projection 由 migration v8 新增。`web_principals.control_admin` 只授予管理平面能力；Memory／Review 仍解析 linked human client 後呼叫既有 `commands` 與 policy/ACL/audit。Enrollment code 與 session/CSRF secret 僅保存 hash，raw 值只在必要 response 出現一次。
 
 **一 key 一 namespace**:credential 本身就是 namespace 邊界。Claude Code 要同時用個人與工作記憶,就設兩個 MCP 連線(兩把 key)。namespace 與 source 一樣由 server 從認證身分決定,request body 傳什麼都沒用。
 

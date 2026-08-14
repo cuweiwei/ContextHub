@@ -1,5 +1,6 @@
 import Fastify, { type FastifyError, type FastifyInstance } from 'fastify';
 import type { Config } from '../config.js';
+import type { DB } from '../db/connection.js';
 import type { AuditRepo } from '../core/audit-repo.js';
 import type { ClientsRepo } from '../core/clients-repo.js';
 import type { Commands } from '../core/commands.js';
@@ -17,14 +18,28 @@ import { registerContextRoutes } from './routes/context.js';
 import { registerMcpRoutes } from '../mcp/http.js';
 import { registerReviewUiRoutes } from './review-ui.js';
 import { registerExploreUiRoutes } from './explore-ui.js';
+import { registerControlRoutes } from './routes/control.js';
+import { registerControlUiRoutes } from './control-ui.js';
+import { readCookie } from './control-auth.js';
+import { createWebPrincipalsRepo } from '../core/web-principals-repo.js';
+import { createWebSessionsRepo } from '../core/web-sessions-repo.js';
+import { createEnrollmentsRepo } from '../core/enrollments-repo.js';
+import { createClientActivityRepo } from '../core/client-activity-repo.js';
+import { createControlCommands } from '../core/control-commands.js';
 
 export interface AppDeps {
+  db: DB;
   config: Config;
   itemsRepo: ItemsRepo;
   clientsRepo: ClientsRepo;
   policiesRepo: PoliciesRepo;
   auditRepo: AuditRepo;
   commands: Commands;
+  webPrincipalsRepo: ReturnType<typeof createWebPrincipalsRepo>;
+  webSessionsRepo: ReturnType<typeof createWebSessionsRepo>;
+  enrollmentsRepo: ReturnType<typeof createEnrollmentsRepo>;
+  clientActivityRepo: ReturnType<typeof createClientActivityRepo>;
+  controlCommands: ReturnType<typeof createControlCommands>;
 }
 
 export function buildApp(deps: AppDeps): FastifyInstance {
@@ -33,8 +48,12 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   });
 
   app.decorateRequest('client', null);
+  app.decorateRequest('controlSession', null);
   app.addHook('onRequest', async (req) => {
-    req.client = resolveClient(req, deps.clientsRepo, deps.config.adminToken);
+    req.client = resolveClient(req, deps.clientsRepo, deps.config.adminToken, deps.config.legacyApiKeysEnabled);
+    const rawSession = readCookie(req, '__Host-contexthub_session');
+    req.controlSession = rawSession ? deps.webSessionsRepo.getValid(rawSession) : null;
+    if (req.client && !req.client.isAdmin) deps.clientActivityRepo.authenticated(req.client.id);
   });
 
   app.setErrorHandler((err: FastifyError, _req, reply) => {
@@ -46,8 +65,8 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   });
 
   registerHealthRoutes(app, deps);
-  registerReviewUiRoutes(app);
-  registerExploreUiRoutes(app);
+  registerReviewUiRoutes(app, deps.config);
+  registerExploreUiRoutes(app, deps.config);
   registerItemRoutes(app, deps);
   registerSourceRoutes(app, deps);
   registerClientRoutes(app, deps);
@@ -56,6 +75,8 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   registerStateRoutes(app, deps);
   registerContextRoutes(app, deps);
   registerMcpRoutes(app, deps);
+  registerControlRoutes(app, deps);
+  registerControlUiRoutes(app, deps);
 
   return app;
 }

@@ -448,6 +448,78 @@ const MIGRATIONS: {
       CREATE INDEX idx_item_embeddings_model ON item_embeddings(model, dimensions);
     `,
   },
+  {
+    version: 8,
+    name: 'control-center-web-auth-and-agent-enrollment',
+    sql: `
+      ALTER TABLE clients ADD COLUMN auth_method TEXT NOT NULL DEFAULT 'legacy_key'
+        CHECK (auth_method IN ('legacy_key','enrollment_key','oauth_user','oauth_client_credentials'));
+
+      CREATE TABLE web_principals (
+        id TEXT PRIMARY KEY,
+        provider TEXT NOT NULL,
+        subject TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        profile_pic_url TEXT,
+        control_admin INTEGER NOT NULL DEFAULT 0,
+        disabled INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        last_seen_at TEXT,
+        UNIQUE(provider, subject)
+      );
+      CREATE INDEX idx_web_principals_subject ON web_principals(provider, subject);
+
+      CREATE TABLE web_principal_clients (
+        principal_id TEXT NOT NULL REFERENCES web_principals(id),
+        client_id TEXT NOT NULL REFERENCES clients(id),
+        created_at TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        PRIMARY KEY(principal_id, client_id)
+      );
+
+      CREATE TABLE web_sessions (
+        id TEXT PRIMARY KEY,
+        token_hash TEXT NOT NULL UNIQUE,
+        principal_id TEXT NOT NULL REFERENCES web_principals(id),
+        csrf_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        idle_expires_at TEXT NOT NULL,
+        absolute_expires_at TEXT NOT NULL,
+        revoked_at TEXT,
+        revoked_by TEXT
+      );
+      CREATE INDEX idx_web_sessions_principal ON web_sessions(principal_id, revoked_at);
+
+      CREATE TABLE agent_enrollments (
+        id TEXT PRIMARY KEY,
+        client_id TEXT NOT NULL REFERENCES clients(id),
+        code_hash TEXT NOT NULL UNIQUE,
+        created_by_principal_id TEXT NOT NULL REFERENCES web_principals(id),
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        consumed_at TEXT,
+        revoked_at TEXT,
+        failed_attempts INTEGER NOT NULL DEFAULT 0,
+        locked_at TEXT
+      );
+      CREATE INDEX idx_agent_enrollments_client ON agent_enrollments(client_id, created_at);
+
+      CREATE TABLE client_activity (
+        client_id TEXT PRIMARY KEY REFERENCES clients(id),
+        last_authenticated_at TEXT,
+        last_mcp_initialize_at TEXT,
+        last_tool_call_at TEXT,
+        last_tool_name TEXT,
+        last_auth_error_at TEXT,
+        last_auth_error_code TEXT,
+        last_policy_denial_at TEXT,
+        last_policy_denial_action TEXT,
+        updated_at TEXT NOT NULL
+      );
+    `,
+  },
 ];
 
 export function migrate(db: Database.Database): void {

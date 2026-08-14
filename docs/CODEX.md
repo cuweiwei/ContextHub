@@ -27,6 +27,8 @@ http://<nas-tailscale-name-or-ip>:8788/mcp
 
 ContextHub currently serves HTTP. Tailscale supplies the private encrypted network boundary; do not send its bearer tokens over untrusted public HTTP.
 
+當 Control Center 已配置 Tailscale Serve HTTPS 時，Web 管理入口使用 `/dashboard`，不再輸入 reviewer key。MCP data plane 仍可暫時使用 namespace-scoped legacy key；personal 與 work credential 必須保持在不同的 Codex project/profile。OAuth pilot 尚未完成 client 實測前不可預填 OAuth 設定，請保留 legacy fallback。
+
 For general agent behavior and migrating Codex's existing durable memory into
 ContextHub, follow [AGENT-GUIDE.md](AGENT-GUIDE.md). In particular, inventory
 the old store read-only, deduplicate with `search_context`, write atomic

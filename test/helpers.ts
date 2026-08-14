@@ -17,6 +17,11 @@ import type {
 import { openDatabase } from '../src/db/connection.js';
 import { ADMIN_CLIENT } from '../src/http/auth.js';
 import { buildApp } from '../src/http/server.js';
+import { createWebPrincipalsRepo } from '../src/core/web-principals-repo.js';
+import { createWebSessionsRepo } from '../src/core/web-sessions-repo.js';
+import { createEnrollmentsRepo } from '../src/core/enrollments-repo.js';
+import { createClientActivityRepo } from '../src/core/client-activity-repo.js';
+import { createControlCommands } from '../src/core/control-commands.js';
 
 export const TEST_ADMIN_TOKEN = 'test-admin-token';
 export { ADMIN_CLIENT };
@@ -91,7 +96,7 @@ export function writerFor(
   };
 }
 
-export function buildTestEnv() {
+export function buildTestEnv(overrides: Partial<Config> = {}) {
   const db = openDatabase(':memory:');
   const itemsRepo = createItemsRepo(db);
   const clientsRepo = createClientsRepo(db);
@@ -106,8 +111,27 @@ export function buildTestEnv() {
     adminToken: TEST_ADMIN_TOKEN,
     logLevel: 'silent',
     sqliteSynchronous: 'NORMAL',
+    controlCenterEnabled: false,
+    controlCenterTailscaleAuthEnabled: false,
+    controlCenterTrustedProxy: false,
+    controlCenterCanonicalOrigin: undefined,
+    controlCenterSessionIdleMinutes: 480,
+    controlCenterSessionMaxDays: 14,
+    controlCenterFreshSessionMinutes: 5,
+    agentEnrollmentEnabled: false,
+    mcpOauthEnabled: false,
+    legacyApiKeysEnabled: true,
+    oauthIssuer: undefined,
+    oauthAudienceBase: undefined,
+    oauthJwksUri: undefined,
+    ...overrides,
   };
-  const app = buildApp({ config, itemsRepo, clientsRepo, policiesRepo, auditRepo, commands });
+  const webPrincipalsRepo = createWebPrincipalsRepo(db);
+  const webSessionsRepo = createWebSessionsRepo(db);
+  const enrollmentsRepo = createEnrollmentsRepo(db);
+  const clientActivityRepo = createClientActivityRepo(db);
+  const controlCommands = createControlCommands({ commands, clientsRepo, auditRepo, webPrincipalsRepo, enrollmentsRepo, policiesRepo });
+  const app = buildApp({ db, config, itemsRepo, clientsRepo, policiesRepo, auditRepo, commands, webPrincipalsRepo, webSessionsRepo, enrollmentsRepo, clientActivityRepo, controlCommands });
 
   /** Registers a client (audited, policy profile applied) and returns its auth. */
   function newClient(opts: {
@@ -156,5 +180,5 @@ export function buildTestEnv() {
     );
   }
 
-  return { db, itemsRepo, clientsRepo, policiesRepo, auditRepo, commands, app, newClient, seed };
+  return { db, itemsRepo, clientsRepo, policiesRepo, auditRepo, commands, app, newClient, seed, webPrincipalsRepo, webSessionsRepo, enrollmentsRepo, controlCommands };
 }

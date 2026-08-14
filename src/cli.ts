@@ -21,6 +21,8 @@
  *   npm run cli -- purge --id 01K...
  *   npm run cli -- idempotency-gc [--days 90]
  *   npm run cli -- seed-demo
+ *   npm run cli -- web-principal-add --provider tailscale --subject user@example.com --name "Owner" --control-admin
+ *   npm run cli -- web-principal-link --subject user@example.com --client tim-reviewer-personal
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -35,6 +37,7 @@ import { createPoliciesRepo } from './core/policies-repo.js';
 import { GRANT_PROFILES, type GrantProfile } from './core/policy.js';
 import { newItemSchema } from './core/types.js';
 import { ADMIN_CLIENT } from './http/auth.js';
+import { createWebPrincipalsRepo } from './core/web-principals-repo.js';
 
 function parseFlags(argv: string[]): Record<string, string> {
   const flags: Record<string, string> = {};
@@ -160,6 +163,7 @@ function main(): void {
   const policiesRepo = createPoliciesRepo(db);
   const auditRepo = createAuditRepo(db);
   const commands = createCommands({ db, itemsRepo, clientsRepo, policiesRepo, auditRepo });
+  const webPrincipalsRepo = createWebPrincipalsRepo(db);
   /** The CLI runs on the DB host as the owner — same authority as the admin token. */
   const admin = ADMIN_CLIENT;
 
@@ -212,6 +216,37 @@ function main(): void {
       if (!profile || profile === 'none') {
         console.log('  NOTE: no grant profile applied — the client has NO capabilities until you edit the namespace policy.');
       }
+      break;
+    }
+    case 'web-principal-add': {
+      const provider = flags.provider;
+      const subject = flags.subject?.trim().toLowerCase();
+      const name = flags.name;
+      if (!provider || !subject || !name) {
+        console.error('usage: web-principal-add --provider tailscale --subject <login> --name <name> [--control-admin]');
+        process.exit(1);
+      }
+      const principal = webPrincipalsRepo.add({ provider, subject, displayName: name, controlAdmin: flags['control-admin'] === 'true' });
+      auditRepo.log({ namespace: '*', clientId: ADMIN_CLIENT.id, action: 'web.principal.create', outcome: 'allow', details: { principal_id: principal.id, provider, control_admin: principal.controlAdmin } });
+      console.log(`web principal created: ${principal.id} (${principal.provider}:${principal.subject})`);
+      break;
+    }
+    case 'web-principal-link': {
+      const subject = flags.subject?.trim().toLowerCase();
+      const clientId = flags.client;
+      if (!subject || !clientId) {
+        console.error('usage: web-principal-link --subject <login> [--provider tailscale] --client <human-client-id>');
+        process.exit(1);
+      }
+      const principal = webPrincipalsRepo.getByIdentity(flags.provider ?? 'tailscale', subject);
+      const target = clientsRepo.get(clientId);
+      if (!principal || !target) {
+        console.error('principal or client not found');
+        process.exit(1);
+      }
+      webPrincipalsRepo.linkClient(principal.id, target, ADMIN_CLIENT.id);
+      auditRepo.log({ namespace: target.namespace, clientId: ADMIN_CLIENT.id, action: 'web.principal.link_client', outcome: 'allow', details: { principal_id: principal.id, target: clientId } });
+      console.log(`linked ${principal.subject} to ${target.id} (${target.namespace})`);
       break;
     }
     case 'list-clients': {

@@ -282,6 +282,21 @@ export interface ClientInfo {
   credential_version: number;
   created_at: string;
   disabled: boolean;
+  auth_method?: 'legacy_key' | 'enrollment_key' | 'oauth_user' | 'oauth_client_credentials';
+}
+
+export interface ControlPrincipal {
+  id: string;
+  provider: string;
+  subject: string;
+  displayName: string;
+  controlAdmin: boolean;
+  disabled: boolean;
+}
+
+export interface ControlActor {
+  principal: ControlPrincipal;
+  sessionId: string;
 }
 
 /**

@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import type { Config } from '../config.js';
 
 const REVIEW_HTML = String.raw`<!doctype html>
 <html lang="zh-Hant">
@@ -461,9 +462,10 @@ const REVIEW_HTML = String.raw`<!doctype html>
 </body>
 </html>`;
 
-export function registerReviewUiRoutes(app: FastifyInstance): void {
-  app.get('/review', async (_req, reply) =>
-    reply
+export function registerReviewUiRoutes(app: FastifyInstance, config?: Config): void {
+  if (config?.controlCenterEnabled) return;
+  app.get('/review', async (_req, reply) => {
+    return reply
       .header(
         'Content-Security-Policy',
         "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
@@ -472,6 +474,6 @@ export function registerReviewUiRoutes(app: FastifyInstance): void {
       .header('Referrer-Policy', 'no-referrer')
       .header('X-Content-Type-Options', 'nosniff')
       .type('text/html; charset=utf-8')
-      .send(REVIEW_HTML),
-  );
+      .send(REVIEW_HTML);
+  });
 }

@@ -42,6 +42,12 @@ Reviewer key 相當於密碼。請保存在密碼管理器或系統鑰匙圈，�
 文件、截圖、Git repository 或 AI 的設定說明中。日常使用不需要
 `ADMIN_TOKEN`。
 
+### Control Center 登入
+
+若管理者已啟用 Control Center，請從 Tailscale HTTPS 網址開啟 `/dashboard`。登入身分由 Tailscale identity headers 辨識，不需要貼 reviewer key；session 是短期 HttpOnly cookie，可由管理者撤銷。Control admin 只代表能管理 Agent／設定，不代表能讀取任何 namespace；要查看或審核 Memory，必須另外 link 對應 namespace 的 human reviewer client。
+
+Agents 頁面可建立單次 enrollment。code 只在建立時顯示一次，交給受支援的 agent-side helper 交換；不要把 code 或交換後的 `chk_` key 貼進聊天、Git、截圖或網址。若 client 不支援 enrollment，暫時使用既有 legacy key，並在完成遷移前保持 `LEGACY_API_KEYS_ENABLED=true`。
+
 ## 3. 最常用的三個操作
 
 ### 查看目前有哪些 Source 與 Memory

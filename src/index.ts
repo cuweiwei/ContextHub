@@ -6,6 +6,11 @@ import { createCommands } from './core/commands.js';
 import { createItemsRepo } from './core/items-repo.js';
 import { createPoliciesRepo } from './core/policies-repo.js';
 import { buildApp } from './http/server.js';
+import { createWebPrincipalsRepo } from './core/web-principals-repo.js';
+import { createWebSessionsRepo } from './core/web-sessions-repo.js';
+import { createEnrollmentsRepo } from './core/enrollments-repo.js';
+import { createClientActivityRepo } from './core/client-activity-repo.js';
+import { createControlCommands } from './core/control-commands.js';
 
 const config = loadConfig();
 // Single-active-instance guard: a second server on the same data dir must
@@ -18,8 +23,13 @@ const clientsRepo = createClientsRepo(db);
 const policiesRepo = createPoliciesRepo(db);
 const auditRepo = createAuditRepo(db);
 const commands = createCommands({ db, itemsRepo, clientsRepo, policiesRepo, auditRepo });
+const webPrincipalsRepo = createWebPrincipalsRepo(db);
+const webSessionsRepo = createWebSessionsRepo(db);
+const enrollmentsRepo = createEnrollmentsRepo(db);
+const clientActivityRepo = createClientActivityRepo(db);
+const controlCommands = createControlCommands({ commands, clientsRepo, auditRepo, webPrincipalsRepo, enrollmentsRepo, policiesRepo });
 
-const app = buildApp({ config, itemsRepo, clientsRepo, policiesRepo, auditRepo, commands });
+const app = buildApp({ db, config, itemsRepo, clientsRepo, policiesRepo, auditRepo, commands, webPrincipalsRepo, webSessionsRepo, enrollmentsRepo, clientActivityRepo, controlCommands });
 
 async function shutdown(signal: string): Promise<void> {
   app.log.info(`${signal} received, shutting down`);
