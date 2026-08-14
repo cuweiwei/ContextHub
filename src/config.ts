@@ -6,6 +6,11 @@ const envBoolean = (defaultValue: boolean) => z.preprocess(
   z.boolean(),
 ).default(defaultValue);
 
+const optionalUrl = z.preprocess(
+  (value) => typeof value === 'string' && value.trim() === '' ? undefined : value,
+  z.string().url().optional(),
+);
+
 const envSchema = z.object({
   PORT: z.coerce.number().int().positive().default(8787),
   HOST: z.string().default('0.0.0.0'),
@@ -21,16 +26,16 @@ const envSchema = z.object({
   CONTROL_CENTER_ENABLED: envBoolean(false),
   CONTROL_CENTER_TAILSCALE_AUTH_ENABLED: envBoolean(false),
   CONTROL_CENTER_TRUSTED_PROXY: envBoolean(false),
-  CONTROL_CENTER_CANONICAL_ORIGIN: z.string().url().optional(),
+  CONTROL_CENTER_CANONICAL_ORIGIN: optionalUrl,
   CONTROL_CENTER_SESSION_IDLE_MINUTES: z.coerce.number().int().positive().default(480),
   CONTROL_CENTER_SESSION_MAX_DAYS: z.coerce.number().int().positive().default(14),
   CONTROL_CENTER_FRESH_SESSION_MINUTES: z.coerce.number().int().positive().default(5),
   AGENT_ENROLLMENT_ENABLED: envBoolean(false),
   MCP_OAUTH_ENABLED: envBoolean(false),
   LEGACY_API_KEYS_ENABLED: envBoolean(true),
-  OAUTH_ISSUER: z.string().url().optional(),
-  OAUTH_AUDIENCE_BASE: z.string().url().optional(),
-  OAUTH_JWKS_URI: z.string().url().optional(),
+  OAUTH_ISSUER: optionalUrl,
+  OAUTH_AUDIENCE_BASE: optionalUrl,
+  OAUTH_JWKS_URI: optionalUrl,
 });
 
 export interface Config {
