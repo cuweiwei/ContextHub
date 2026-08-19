@@ -54,6 +54,21 @@ const reviewBodySchema = z.object({
   idempotency_key: z.string().min(1).max(200),
 });
 
+const reviewBatchBodySchema = z.object({
+  namespace: z.string().min(1),
+  confirm_namespace: z.string().min(1),
+  confirm_item_ids: z.array(z.string().min(1)).min(1).max(20),
+  confirm_counts: z.object({ normal: z.number().int().nonnegative(), private: z.number().int().nonnegative() }),
+  confirm_private: z.boolean().default(false),
+  items: z.array(z.object({
+    id: z.string().min(1),
+    decision: z.enum(['accept', 'reject', 'revoke']),
+    expected_revision: z.number().int().positive(),
+    note: z.string().max(2000).optional(),
+    idempotency_key: z.string().min(1).max(200),
+  })).min(1).max(20),
+});
+
 const revokeBodySchema = z.object({
   expected_revision: z.number().int().min(1),
   note: z.string().max(2000).optional(),
@@ -153,6 +168,19 @@ export function registerItemRoutes(app: FastifyInstance, deps: AppDeps): void {
     } catch (err) {
       return sendError(reply, err);
     }
+  });
+
+  app.post('/v1/items/reviews/batch', { preHandler: requireScope('write') }, async (req, reply) => {
+    const parsed = reviewBatchBodySchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: { code: 'invalid_request', message: parsed.error.message } });
+    const body = parsed.data;
+    const namespace = body.namespace;
+    if (body.confirm_namespace !== namespace) return reply.code(400).send({ error: { code: 'confirmation_required', message: 'confirm_namespace must match the target namespace' } });
+    if (body.confirm_counts.normal < 0 || body.confirm_counts.private < 0) return reply.code(400).send({ error: { code: 'invalid_request', message: 'confirm_counts must be non-negative' } });
+    try {
+      const result = deps.commands.reviewBatch(req.client!, { namespace, confirmItemIds: body.confirm_item_ids, confirmPrivate: body.confirm_private, expectedCounts: body.confirm_counts, items: body.items.map((entry) => ({ id: entry.id, decision: entry.decision, expectedRevision: entry.expected_revision, note: entry.note, idempotencyKey: entry.idempotency_key })) });
+      return reply.send({ namespace, normal_count: result.normalCount, private_count: result.privateCount, results: result.results });
+    } catch (err) { return sendError(reply, err); }
   });
 
   app.get('/v1/items', { preHandler: requireScope('read') }, async (req, reply) => {

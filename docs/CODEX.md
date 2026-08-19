@@ -98,7 +98,7 @@ On macOS, a GUI Codex process must inherit the environment variable. Load it fro
 
 After restarting Codex:
 
-1. Confirm the server initializes and exposes 19 tools.
+1. Confirm the server initializes and exposes 21 tools.
 2. Call `list_context_sources`.
 3. Call `compile_context` with a harmless task and confirm the package is accepted-only, namespace-bound, and under budget.
 4. Call `get_context_brief`.

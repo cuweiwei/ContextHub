@@ -3,6 +3,7 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import Database from 'better-sqlite3';
 import packageJson from '../../package.json' with { type: 'json' };
+import { verifyAuditChain } from '../core/audit-chain.js';
 
 export interface PreMigrationManifest {
   format: 'contexthub-backup-manifest/v1';
@@ -13,6 +14,7 @@ export interface PreMigrationManifest {
   runtime: { version: string; build_commit: string; schema_version: number; retrieval_model: string };
   target_schema_version: number;
   verification: { quick_check: 'ok' };
+  audit_chain?: { row_count: number; latest_audit_id: number; root_hash: string; verified: boolean };
 }
 
 function sha256(file: string): string {
@@ -35,6 +37,11 @@ export function writePreMigrationSnapshot(db: Database.Database, outDir: string,
   } finally {
     probe.close();
   }
+  const auditDb = new Database(destination, { readonly: true, fileMustExist: true });
+  const auditChain = auditDb.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'audit_chain'").get()
+    ? verifyAuditChain(auditDb)
+    : undefined;
+  auditDb.close();
   const manifest: PreMigrationManifest = {
     format: 'contexthub-backup-manifest/v1',
     backup_id: `bkp_${randomUUID()}`,
@@ -49,6 +56,7 @@ export function writePreMigrationSnapshot(db: Database.Database, outDir: string,
     },
     target_schema_version: targetSchemaVersion,
     verification: { quick_check: 'ok' },
+    audit_chain: auditChain,
   };
   // Keep the snapshot filename discoverable by legacy restore tooling while
   // hiding the sidecar from glob patterns that enumerate snapshot files.

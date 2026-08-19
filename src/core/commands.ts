@@ -20,6 +20,9 @@ import {
   type Capability,
   type GrantProfile,
   type PolicyV1,
+  type PolicySimulationCase,
+  type PolicySimulationResult,
+  simulatePolicy,
 } from './policy.js';
 import type { PoliciesRepo } from './policies-repo.js';
 import {
@@ -28,6 +31,12 @@ import {
   type ContextTarget,
 } from './context-compiler.js';
 import { ulid } from './ids.js';
+import { expandCjkQueries } from './cjk-variants.js';
+import { assertAllowedWebhook, deriveWebhookSecret, enqueueChangeNotification } from './notifications.js';
+import { rebuildEntityGraph, traverseEntityGraph } from './entity-graph.js';
+import { rebuildConsolidationQueue, suggestionDigest } from './consolidation.js';
+import { createCampaign, migrationCampaignStatus, upsertCampaignSource } from './migration-campaigns.js';
+import { operationalAuditReport } from './audit-report.js';
 import {
   accessFor,
   resolveAuthority,
@@ -60,6 +69,8 @@ export interface CommandDeps {
   clientsRepo: ClientsRepo;
   policiesRepo: PoliciesRepo;
   auditRepo: AuditRepo;
+  webhookAllowedHosts?: string[];
+  webhookSigningMasterKey?: string;
 }
 
 export interface AuthzContext {
@@ -112,7 +123,7 @@ function contextRetrievalQueries(intent: string, related: string[] = []): string
       add(part);
     }
   }
-  return [...queries].slice(0, 20);
+  return expandCjkQueries([...queries], 20);
 }
 
 export function createCommands(deps: CommandDeps) {
@@ -124,6 +135,8 @@ export function createCommands(deps: CommandDeps) {
   const idemInsert = db.prepare(
     'INSERT INTO idempotency_records (namespace, client_id, idempotency_key, operation, request_hash, result_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
   );
+
+  const changeInsert = db.prepare('INSERT INTO change_events (namespace, action, entity_kind, entity_id, revision, occurred_at) VALUES (?, ?, ?, ?, ?, ?)');
 
   // ---------- authorization ----------
 
@@ -217,7 +230,7 @@ export function createCommands(deps: CommandDeps) {
     operation: string,
     idempotencyKey: string,
     payload: unknown,
-    opts: { targetNamespace?: string | null; itemId?: (result: T) => string | null },
+    opts: { targetNamespace?: string | null; itemId?: (result: T) => string | null; persistResult?: (result: T) => unknown; emitChangeEvent?: boolean },
     fn: (ctx: AuthzContext) => T,
   ): { result: T; replayed: boolean } {
     if (!idempotencyKey || typeof idempotencyKey !== 'string') {
@@ -253,7 +266,17 @@ export function createCommands(deps: CommandDeps) {
           return { result: JSON.parse(existing.result_json) as T, replayed: true };
         }
         const result = fn(ctx);
-        idemInsert.run(ns, client.id, idempotencyKey, operation, hash, JSON.stringify(result), new Date().toISOString());
+        const entityId = opts.itemId?.(result) ?? (typeof result === 'object' && result !== null && 'id' in result ? String((result as { id: unknown }).id) : idempotencyKey);
+        const eventNamespace = ns === '*' && entityId ? (db.prepare('SELECT namespace FROM context_items WHERE id = ?').get(entityId) as { namespace: string } | undefined)?.namespace : ns;
+        const revision = typeof result === 'object' && result !== null && 'item' in result && (result as { item?: { revision?: number } }).item?.revision !== undefined
+          ? (result as { item: { revision: number } }).item.revision
+          : null;
+        if (opts.emitChangeEvent !== false && eventNamespace && eventNamespace !== '*') {
+          const occurredAt = new Date().toISOString();
+          changeInsert.run(eventNamespace, operation, operation.startsWith('write.') ? 'context_item' : 'domain', entityId, revision, occurredAt);
+          enqueueChangeNotification(db, { namespace: eventNamespace, category: operation, severity: 'info', count: 1, timestamp: occurredAt });
+        }
+        idemInsert.run(ns, client.id, idempotencyKey, operation, hash, JSON.stringify(opts.persistResult ? opts.persistResult(result) : result), new Date().toISOString());
         auditRepo.log({
           namespace: ns,
           clientId: client.id,
@@ -432,7 +455,7 @@ export function createCommands(deps: CommandDeps) {
       { itemId, patch },
       { itemId: () => itemId },
       (ctx) => {
-        const existing = itemsRepo.get(ctx.access, itemId, { allCandidates: ctx.client.isAdmin });
+        const existing = itemsRepo.get(ctx.access, itemId, { allCandidates: true });
         if (!existing) throw new NotFoundError(`no item with id "${itemId}"`);
         if (!ctx.client.isAdmin) {
           if (ctx.client.principalKind === 'agent') {
@@ -598,6 +621,55 @@ export function createCommands(deps: CommandDeps) {
       },
     );
     return { ...result, replayed };
+  }
+
+  function reviewBatch(
+    client: ClientAuth,
+    input: {
+      namespace?: string;
+      confirmItemIds: string[];
+      confirmPrivate: boolean;
+      expectedCounts?: { normal: number; private: number };
+      items: Array<{ id: string; decision: 'accept' | 'reject' | 'revoke'; expectedRevision: number; note?: string; idempotencyKey: string }>;
+    },
+  ) {
+    if (input.items.length < 1 || input.items.length > 20) throw new ValidationError('review batch must contain 1 to 20 items');
+    const ids = input.items.map((item) => item.id);
+    const targetNamespace = input.namespace ?? client.namespace;
+    if (new Set(ids).size !== ids.length) throw new ValidationError('review batch cannot contain duplicate item ids');
+    if (!client.isAdmin && targetNamespace !== client.namespace) throw new PolicyDeniedError('review batch namespace is bound to the credential');
+    const confirmedIds = new Set(input.confirmItemIds);
+    if (confirmedIds.size !== ids.length || input.confirmItemIds.length !== ids.length || input.confirmItemIds.some((id) => !ids.includes(id))) {
+      throw new ValidationError('confirmation must list exactly the item ids being reviewed');
+    }
+    const privateAccepted: string[] = [];
+    let normalCount = 0;
+    let privateCount = 0;
+    for (const entry of input.items) {
+      const visible = itemsRepo.get(accessFor(client), entry.id, { allCandidates: true });
+      if (!visible || (!client.isAdmin && visible.namespace !== targetNamespace)) throw new NotFoundError(`no item with id "${entry.id}"`);
+      if (entry.decision === 'accept' && visible.sensitivity === 'private') { privateAccepted.push(entry.id); privateCount += 1; }
+      else if (entry.decision === 'accept') normalCount += 1;
+    }
+    if (input.expectedCounts && (input.expectedCounts.normal !== normalCount || input.expectedCounts.private !== privateCount)) {
+      throw new ValidationError(`review counts changed; expected normal=${input.expectedCounts.normal}, private=${input.expectedCounts.private}, authoritative normal=${normalCount}, private=${privateCount}`);
+    }
+    if (privateAccepted.length > 0 && !input.confirmPrivate) throw new ValidationError('confirm_private is required when accepting private items');
+    const results = input.items.map((entry) => {
+      try {
+        const result = reviewMemory(client, entry.id, {
+          decision: entry.decision,
+          expectedRevision: entry.expectedRevision,
+          note: entry.note,
+        }, entry.idempotencyKey);
+        return { id: entry.id, status: 'succeeded' as const, ...result };
+      } catch (err) {
+        const code = (err as { code?: string }).code ?? 'error';
+        const status = code === 'revision_conflict' || code === 'idempotency_conflict' ? 'conflict' : code === 'policy_denied' || code === 'not_found' ? 'denied' : 'failed';
+        return { id: entry.id, status: status as 'conflict' | 'denied' | 'failed', error: { code, message: (err as Error).message } };
+      }
+    });
+    return { normalCount, privateCount, results };
   }
 
   /** Typed task mutations — semantic fields are unreachable by construction. */
@@ -837,8 +909,13 @@ export function createCommands(deps: CommandDeps) {
       filters?: Parameters<ItemsRepo['search']>[1]['filters'];
       stateKeys?: string[];
       entities?: string[];
+      runtimeInputs?: Array<{ kind: 'system_constraint' | 'tool_result'; value: string }>;
     },
   ) {
+    const runtimeBytes = (opts.runtimeInputs ?? []).reduce((sum, input) => sum + Buffer.byteLength(input.value, 'utf8'), 0);
+    if ((opts.runtimeInputs?.length ?? 0) > 20 || runtimeBytes > 50_000) throw new ValidationError('runtime_inputs must contain at most 20 entries and 50 KB total');
+    const runtimeTokens = (opts.runtimeInputs ?? []).reduce((sum, input) => sum + Math.ceil(Buffer.byteLength(JSON.stringify(input), 'utf8') / 3) + 8, 0);
+    if (64 + runtimeTokens > opts.tokenBudget) throw new ValidationError('runtime_inputs exceed the requested token budget');
     return readAudited(
       client,
       'read.compile_context',
@@ -848,6 +925,9 @@ export function createCommands(deps: CommandDeps) {
         target: opts.target,
         token_budget: opts.tokenBudget,
         state_key_count: opts.stateKeys?.length ?? 0,
+        runtime_input_count: opts.runtimeInputs?.length ?? 0,
+        runtime_input_bytes: (opts.runtimeInputs ?? []).reduce((sum, input) => sum + Buffer.byteLength(input.value, 'utf8'), 0),
+        runtime_input_kinds: [...new Set((opts.runtimeInputs ?? []).map((input) => input.kind))],
       },
       (ctx) => {
         if (ctx.client.isAdmin) {
@@ -889,6 +969,7 @@ export function createCommands(deps: CommandDeps) {
           tokenBudget: opts.tokenBudget,
           candidates,
           retrieval: found.retrieval,
+          runtimeInputs: opts.runtimeInputs,
         });
       },
     );
@@ -1168,18 +1249,182 @@ export function createCommands(deps: CommandDeps) {
     );
   }
 
-  function queryAudit(client: ClientAuth, opts: { namespace?: string; limit?: number; beforeId?: number }) {
+  function queryAudit(client: ClientAuth, opts: Parameters<AuditRepo['query']>[0]) {
     return readAudited(
       client,
       'read.audit',
       client.isAdmin ? null : 'audit.read',
-      { namespace: opts.namespace ?? null, limit: opts.limit ?? null },
+        { namespace: opts.namespace ?? null, limit: opts.limit ?? null, action: opts.action ?? null, outcome: opts.outcome ?? null },
       (ctx) => {
         // Non-admin audit readers are pinned to their own namespace.
         const namespace = ctx.client.isAdmin ? opts.namespace : ctx.client.namespace;
         return auditRepo.query({ ...opts, namespace });
       },
     );
+  }
+
+  function changes(client: ClientAuth, opts: { after?: number; limit?: number } = {}) {
+    return readAudited(client, 'read.changes', client.isAdmin ? null : 'change.read', { after: opts.after ?? 0, limit: opts.limit ?? 100 }, (ctx) => {
+      const limit = Math.min(1000, Math.max(1, opts.limit ?? 100));
+      const after = Math.max(0, opts.after ?? 0);
+      const namespace = ctx.client.isAdmin ? undefined : ctx.client.namespace;
+      const rows = namespace
+        ? db.prepare('SELECT cursor, namespace, action, entity_kind, entity_id, revision, occurred_at FROM change_events WHERE namespace = ? AND cursor > ? ORDER BY cursor LIMIT ?').all(namespace, after, limit)
+        : db.prepare('SELECT cursor, namespace, action, entity_kind, entity_id, revision, occurred_at FROM change_events WHERE cursor > ? ORDER BY cursor LIMIT ?').all(after, limit);
+      const events = rows as Array<{ cursor: number; namespace: string; action: string; entity_kind: string; entity_id: string; revision: number | null; occurred_at: string }>;
+      return { events, next_cursor: events.at(-1)?.cursor ?? after };
+    });
+  }
+
+  function connectorRun(client: ClientAuth, input: { connector: string; checkpointKey: string; checkpointValue?: string | null; status: 'ok' | 'stale' | 'failed'; counts?: Record<string, number> }, idempotencyKey: string) {
+    const { result, replayed } = runMutation(client, 'connector.sync', idempotencyKey, input, {}, (ctx) => {
+      requireCap(ctx, 'connector.sync');
+      if (ctx.client.isAdmin) throw new ValidationError('connector runs require a namespace-bound service principal');
+      if (ctx.client.principalKind !== 'service' && !ctx.client.isAdmin) throw new PolicyDeniedError('connector runs require a service principal');
+      const checkpointRule = stateRuleFor(ctx.policy!, input.checkpointKey);
+      if (!checkpointRule || !checkpointRule.write_clients.includes(ctx.client.id)) throw new PolicyDeniedError(`checkpoint key "${input.checkpointKey}" is not registered for this connector service`);
+      const id = ulid();
+      const now = new Date().toISOString();
+      db.prepare('INSERT INTO connector_runs (id, namespace, connector, profile, checkpoint_key, checkpoint_value, status, counts, started_at, finished_at) VALUES (?, ?, ?, \'connector-producer\', ?, ?, ?, ?, ?, ?)').run(id, ctx.client.namespace, input.connector, input.checkpointKey, input.checkpointValue ?? null, input.status, JSON.stringify(input.counts ?? {}), now, now);
+      return { id, connector: input.connector, status: input.status, checkpoint_key: input.checkpointKey };
+    });
+    return { ...result, replayed };
+  }
+
+  function connectorTombstones(client: ClientAuth, items: Array<{ id: string; expectedRevision: number }>, idempotencyKey: string) {
+    if (items.length < 1 || items.length > 100) throw new ValidationError('tombstone batch must contain 1 to 100 items');
+    const { result, replayed } = runMutation(client, 'connector.tombstone', idempotencyKey, { items }, { emitChangeEvent: false }, (ctx) => {
+      requireCap(ctx, 'connector.sync'); if (ctx.client.isAdmin || ctx.client.principalKind !== 'service') throw new PolicyDeniedError('connector tombstones require a namespace-bound service principal');
+      const results = items.map((entry) => { const current = itemsRepo.get(ctx.access, entry.id, { allCandidates: true }); if (!current || current.source !== ctx.client.id) return { id: entry.id, status: 'not_found' as const }; try { const item = itemsRepo.update(entry.id, { status: 'cancelled', expected_revision: entry.expectedRevision }, ctx.client.id); if (item) { const timestamp = new Date().toISOString(); changeInsert.run(ctx.client.namespace, 'connector.tombstone', 'context_item', item.id, item.revision, timestamp); enqueueChangeNotification(db, { namespace: ctx.client.namespace, category: 'connector.tombstone', severity: 'info', count: 1, timestamp }); return { id: entry.id, status: 'succeeded' as const, revision: item.revision }; } return { id: entry.id, status: 'not_found' as const }; } catch (err) { return { id: entry.id, status: 'failed' as const, error: (err as Error).message }; } });
+      return { results };
+    });
+    return { ...result, replayed };
+  }
+
+  function createSubscription(client: ClientAuth, input: { kind: 'webhook' | 'telegram'; endpoint?: string; eventCategories?: string[] }, idempotencyKey: string) {
+    type SubscriptionResult = { id: string; kind: 'webhook' | 'telegram'; namespace: string; signing_secret?: string };
+    const { result, replayed } = runMutation<SubscriptionResult>(client, 'change.manage', idempotencyKey, input, { persistResult: (value) => ({ id: value.id, kind: value.kind, namespace: value.namespace }) }, (ctx): SubscriptionResult => {
+      requireCap(ctx, 'change.manage');
+      if (ctx.client.isAdmin) throw new ValidationError('subscriptions require a namespace-bound human client');
+      if (!ctx.client.isAdmin && ctx.client.principalKind !== 'human') throw new PolicyDeniedError('subscriptions require a linked human or admin');
+      if (input.kind === 'webhook' && !deps.webhookSigningMasterKey) throw new ValidationError('webhook signing master key is not configured; refusing to create a subscription');
+      if (input.kind === 'webhook') assertAllowedWebhook(input.endpoint ?? '', { allowedHosts: deps.webhookAllowedHosts ?? (process.env.WEBHOOK_ALLOWED_HOSTS ?? '').split(',').map((value) => value.trim()).filter(Boolean) });
+      const id = ulid(); const now = new Date().toISOString();
+      db.prepare('INSERT INTO change_subscriptions (id, namespace, kind, endpoint, event_categories, status, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, \'active\', ?, ?, ?)').run(id, ctx.client.namespace, input.kind, input.endpoint ?? null, JSON.stringify(input.eventCategories ?? ['*']), ctx.client.id, now, now);
+      const secret = input.kind === 'webhook' && deps.webhookSigningMasterKey ? deriveWebhookSecret(id, deps.webhookSigningMasterKey) : undefined;
+      return { id, kind: input.kind, namespace: ctx.client.namespace, ...(secret ? { signing_secret: secret } : {}) };
+    });
+    return { ...result, replayed };
+  }
+
+  function traverseGraph(client: ClientAuth, input: { entity: string; depth?: number }) {
+    return readAudited(client, 'read.entity_graph', client.isAdmin ? null : 'memory.read_accepted', { depth: Math.min(3, input.depth ?? 2) }, (ctx) => {
+      if (ctx.client.isAdmin) throw new ValidationError('entity graph traversal requires a namespace-bound client');
+      rebuildEntityGraph(db);
+      return traverseEntityGraph(db, itemsRepo, ctx.access, input.entity, input.depth ?? 2);
+    });
+  }
+
+  function consolidation(client: ClientAuth, namespace?: string) {
+    return readAudited(client, 'read.consolidation_suggestions', client.isAdmin ? null : 'memory.read_accepted', { namespace: namespace ?? null }, (ctx) => { rebuildConsolidationQueue(db); return suggestionDigest(db, ctx.client.isAdmin ? namespace : ctx.client.namespace); });
+  }
+
+  function createMigrationCampaign(client: ClientAuth, input: { namespace: string; name: string }, idempotencyKey: string) {
+    const { result, replayed } = runMutation(client, 'migration.manage', idempotencyKey, input, { targetNamespace: input.namespace }, (ctx) => {
+      requirePolicyManage(client, input.namespace);
+      return { campaign_id: createCampaign(db, input.namespace, input.name, ctx.client.id) };
+    });
+    return { ...result, replayed };
+  }
+
+  function updateMigrationSource(client: ClientAuth, input: { campaignId: string; sourceKey: string; domain: string; status: 'pending' | 'inaccessible' | 'unknown' | 'ready' | 'complete'; expectedCount?: number | null }, idempotencyKey: string) {
+    const { result, replayed } = runMutation(client, 'migration.source', idempotencyKey, input, {}, (ctx) => {
+      const campaign = db.prepare('SELECT namespace FROM migration_campaigns WHERE id = ?').get(input.campaignId) as { namespace: string } | undefined;
+      if (!campaign) throw new NotFoundError('migration campaign not found');
+      requirePolicyManage(client, campaign.namespace);
+      upsertCampaignSource(db, input.campaignId, input.sourceKey, input.domain, input.status, input.expectedCount ?? null);
+      return { campaign_id: input.campaignId, source_key: input.sourceKey };
+    });
+    return { ...result, replayed };
+  }
+
+  function getMigrationCampaign(client: ClientAuth, id: string) {
+    return readAudited(client, 'read.migration_campaign', client.isAdmin ? null : 'policy.manage', { campaign_id: id }, () => {
+      const value = migrationCampaignStatus(db, id); if (!value) throw new NotFoundError('migration campaign not found');
+      if (!client.isAdmin && value.campaign.namespace !== client.namespace) throw new NotFoundError('migration campaign not found');
+      return value;
+    });
+  }
+
+  function markMigrationGate(client: ClientAuth, input: { campaignId: string; gate: 'fresh_query' | 'legacy_store' | 'backup_restore' }, idempotencyKey: string) {
+    const campaign = db.prepare('SELECT namespace FROM migration_campaigns WHERE id = ?').get(input.campaignId) as { namespace: string } | undefined;
+    if (!campaign) throw new NotFoundError('migration campaign not found');
+    const { result, replayed } = runMutation(client, 'migration.gate', idempotencyKey, input, { targetNamespace: campaign.namespace }, (ctx) => {
+      requirePolicyManage(client, campaign.namespace);
+      const column = input.gate === 'fresh_query' ? 'fresh_query_verified_at' : input.gate === 'legacy_store' ? 'legacy_store_verified_at' : 'backup_restore_verified_at';
+      const now = new Date().toISOString(); db.prepare(`UPDATE migration_campaigns SET ${column} = ?, updated_at = ?, last_mutation_at = ? WHERE id = ?`).run(now, now, now, input.campaignId);
+      return { campaign_id: input.campaignId, gate: input.gate, verified_at: now };
+    });
+    return { ...result, replayed };
+  }
+
+  function recordMigrationLedger(client: ClientAuth, input: { campaignId: string; sourceKey: string; externalRefHash: string; disposition: 'imported' | 'duplicate' | 'excluded' | 'pending' | 'submitted'; candidateItemId?: string; exclusionReason?: string }, idempotencyKey: string) {
+    const campaign = db.prepare('SELECT namespace FROM migration_campaigns WHERE id = ?').get(input.campaignId) as { namespace: string } | undefined;
+    if (!campaign) throw new NotFoundError('migration campaign not found');
+    const { result, replayed } = runMutation(client, 'migration.ledger', idempotencyKey, input, { targetNamespace: campaign.namespace }, () => {
+      requirePolicyManage(client, campaign.namespace); const id = ulid(); const now = new Date().toISOString();
+      db.prepare('INSERT INTO migration_ledger (id, campaign_id, source_key, external_ref_hash, disposition, candidate_item_id, exclusion_reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(campaign_id, source_key, external_ref_hash) DO UPDATE SET disposition = excluded.disposition, candidate_item_id = excluded.candidate_item_id, exclusion_reason = excluded.exclusion_reason').run(id, input.campaignId, input.sourceKey, input.externalRefHash, input.disposition, input.candidateItemId ?? null, input.exclusionReason ?? null, now);
+      db.prepare("UPDATE migration_sources SET imported_count = (SELECT COUNT(*) FROM migration_ledger WHERE campaign_id = ? AND source_key = ? AND disposition = 'imported'), duplicate_count = (SELECT COUNT(*) FROM migration_ledger WHERE campaign_id = ? AND source_key = ? AND disposition = 'duplicate'), excluded_count = (SELECT COUNT(*) FROM migration_ledger WHERE campaign_id = ? AND source_key = ? AND disposition = 'excluded'), candidate_pending_count = (SELECT COUNT(*) FROM migration_ledger WHERE campaign_id = ? AND source_key = ? AND disposition IN ('pending', 'submitted')) WHERE campaign_id = ? AND source_key = ?").run(input.campaignId, input.sourceKey, input.campaignId, input.sourceKey, input.campaignId, input.sourceKey, input.campaignId, input.sourceKey, input.campaignId, input.sourceKey);
+      return { campaign_id: input.campaignId, source_key: input.sourceKey, disposition: input.disposition };
+    });
+    return { ...result, replayed };
+  }
+
+  function auditOperations(client: ClientAuth) {
+    if (!client.isAdmin) throw new PolicyDeniedError('operational audit reports require the admin token');
+    auditRepo.log({ namespace: '*', clientId: client.id, action: 'read.audit_operations', outcome: 'allow', details: { window_hours: 24 } });
+    return operationalAuditReport(db);
+  }
+
+  function validatePolicyDraft(client: ClientAuth, namespace: string, rules: unknown) {
+    const ctx = requirePolicyManage(client, namespace);
+    if (!ctx.client.isAdmin && ctx.client.namespace !== namespace) throw new PolicyDeniedError('policy.manage is namespace-scoped');
+    try {
+      const current = policiesRepo.apply;
+      void current;
+      // validatePolicy is deliberately reached through the repository's
+      // referential validator without installing a new version.
+      policiesRepo.validate(namespace, rules);
+      return { valid: true, rules };
+    } catch (err) {
+      return { valid: false, error: (err as Error).message };
+    }
+  }
+
+  function simulatePolicyDraft(client: ClientAuth, namespace: string, rules: unknown, cases: PolicySimulationCase[]): { results: PolicySimulationResult[] } {
+    const ctx = requirePolicyManage(client, namespace);
+    if (!ctx.client.isAdmin && ctx.client.namespace !== namespace) throw new PolicyDeniedError('policy.manage is namespace-scoped');
+    const policy = policiesRepo.validate(namespace, rules);
+    return { results: cases.slice(0, 100).map((input) => simulatePolicy(policy, input)) };
+  }
+
+  function effectiveness(client: ClientAuth, opts: { namespace?: string; since?: string; until?: string } = {}) {
+    return readAudited(client, 'read.effectiveness', client.isAdmin ? null : 'memory.read_accepted', { namespace: opts.namespace ?? null, since: opts.since ?? null, until: opts.until ?? null }, (ctx) => {
+      const targetNamespace = ctx.client.isAdmin ? opts.namespace : ctx.client.namespace;
+      if (!targetNamespace) throw new ValidationError('effectiveness requires a namespace for admin reads');
+      const where = ['o.namespace = ?'];
+      const params: unknown[] = [targetNamespace];
+      if (opts.since) { where.push('o.created_at >= ?'); params.push(opts.since); }
+      if (opts.until) { where.push('o.created_at <= ?'); params.push(opts.until); }
+      const summary = db.prepare(`SELECT outcome, action_changed, COUNT(*) AS count FROM context_outcomes o WHERE ${where.join(' AND ')} GROUP BY outcome, action_changed ORDER BY outcome, action_changed`).all(...params);
+      const clients = db.prepare(`SELECT o.client_id, COUNT(*) AS count, SUM(CASE WHEN o.outcome = 'helpful' THEN 1 ELSE 0 END) AS helpful, SUM(CASE WHEN o.outcome = 'harmful' THEN 1 ELSE 0 END) AS harmful FROM context_outcomes o WHERE ${where.join(' AND ')} GROUP BY o.client_id ORDER BY count DESC`).all(...params);
+      const sources = db.prepare(`SELECT i.source, COUNT(*) AS uses, SUM(CASE WHEN o.outcome = 'helpful' THEN 1 ELSE 0 END) AS helpful, SUM(CASE WHEN o.outcome = 'harmful' THEN 1 ELSE 0 END) AS harmful FROM context_outcomes o, json_each(o.item_ids) ids JOIN context_items i ON i.id = ids.value WHERE ${where.join(' AND ')} AND i.namespace = ? GROUP BY i.source ORDER BY uses DESC`).all(...params, targetNamespace);
+      const items = db.prepare(`SELECT i.id AS item_id, i.type, i.source, i.title, COUNT(*) AS uses, SUM(CASE WHEN o.outcome = 'helpful' THEN 1 ELSE 0 END) AS helpful, SUM(CASE WHEN o.outcome = 'harmful' THEN 1 ELSE 0 END) AS harmful
+        FROM context_outcomes o, json_each(o.item_ids) ids JOIN context_items i ON i.id = ids.value
+        WHERE ${where.join(' AND ')} AND i.namespace = ? GROUP BY i.id ORDER BY uses DESC`).all(...params, targetNamespace) as Array<{ item_id: string; type: string; source: string; title: string; uses: number; helpful: number; harmful: number }>;
+      const low_value = items.filter((item) => item.uses >= 3 && (item.harmful >= 2 || item.helpful / item.uses < 0.25)).map((item) => ({ item_id: item.item_id, kind: 'low_value', uses: item.uses, helpful: item.helpful, harmful: item.harmful }));
+      return { summary, clients, sources, items, low_value };
+    });
   }
 
   // ---------- administration (audited) ----------
@@ -1195,24 +1440,26 @@ export function createCommands(deps: CommandDeps) {
     return ctx;
   }
 
-  function applyPolicy(client: ClientAuth, namespace: string, rules: unknown): { namespace: string; version: number } {
-    try {
-      requirePolicyManage(client, namespace);
-      const current = policiesRepo.apply(namespace, rules, client.id);
-      auditRepo.log({
-        namespace,
-        clientId: client.id,
-        action: 'admin.policy_apply',
-        outcome: 'allow',
-        details: { version: current.version },
-      });
-      return { namespace, version: current.version };
-    } catch (err) {
-      if (err instanceof PolicyDeniedError) {
-        auditRepo.logDenySafe({ namespace, clientId: client.id, action: 'admin.policy_apply', details: { reason: 'policy_denied' } });
-      }
-      throw err;
-    }
+  function applyPolicy(
+    client: ClientAuth,
+    namespace: string,
+    rules: unknown,
+    opts: { expectedVersion?: number; idempotencyKey?: string } = {},
+  ): { namespace: string; version: number; replayed?: boolean } {
+    const idempotencyKey = opts.idempotencyKey ?? `policy-${ulid()}`;
+    const { result, replayed } = runMutation(
+      client,
+      'admin.policy_apply',
+      idempotencyKey,
+      { namespace, rules, expectedVersion: opts.expectedVersion },
+      { targetNamespace: namespace },
+      () => {
+        requirePolicyManage(client, namespace);
+        const current = policiesRepo.apply(namespace, rules, client.id, opts.expectedVersion);
+        return { namespace, version: current.version };
+      },
+    );
+    return { ...result, replayed };
   }
 
   function getPolicy(client: ClientAuth, namespace: string) {
@@ -1342,6 +1589,7 @@ export function createCommands(deps: CommandDeps) {
     reviseCandidate,
     proposeSuccessor,
     reviewMemory,
+    reviewBatch,
     operateTask,
     curateNote,
     updateOperationalState,
@@ -1365,6 +1613,22 @@ export function createCommands(deps: CommandDeps) {
     recent,
     sourcesOverview,
     queryAudit,
+    changes,
+    connectorRun,
+    connectorTombstones,
+    createSubscription,
+    traverseGraph,
+    consolidation,
+    rebuildConsolidationQueue: () => rebuildConsolidationQueue(db),
+    createMigrationCampaign,
+    updateMigrationSource,
+    getMigrationCampaign,
+    markMigrationGate,
+    recordMigrationLedger,
+    auditOperations,
+    validatePolicyDraft,
+    simulatePolicyDraft,
+    effectiveness,
     applyPolicy,
     getPolicy,
     adminCreateClient,

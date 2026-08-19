@@ -56,4 +56,6 @@ CSRF 與 session revoke 測試後，才開 `AGENT_ENROLLMENT_ENABLED`。Enrollme
 
 ## Rollback
 
-先把 `CONTROL_CENTER_ENABLED=false`、`AGENT_ENROLLMENT_ENABLED=false`、`MCP_OAUTH_ENABLED=false`，重啟 container；legacy MCP/REST 保持可用。優先回復上一個 image，不還原 DB，以免丟失部署後的 Memory writes。只有 schema 不相容或 DB 損壞才用 migration v9 前的 pre-migration snapshot，且還原後必跑 `reindex`。
+先把 `CONTROL_CENTER_ENABLED=false`、`AGENT_ENROLLMENT_ENABLED=false`、`MCP_OAUTH_ENABLED=false`，重啟 container；legacy MCP/REST 保持可用。優先回復上一個 image，不還原 DB，以免丟失部署後的 Memory writes。只有 schema 不相容或 DB 損壞才用對應 migration 的 pre-migration snapshot，且還原後必跑 `reindex`；v10+ audit tail 只能經 owner-reviewed `audit-chain-extend` 接回。
+
+P1/P2 outbound defaults remain off. Before enabling webhook/Telegram, mount provider files with mode `0600`, set `WEBHOOK_ALLOWED_HOSTS` and `WEBHOOK_SIGNING_MASTER_KEY`, and verify that the destination is owner-approved. OAuth requires issuer, JWKS URI and canonical audience; an incomplete configuration returns fail-closed errors. Calendar/GitHub workers must use separate personal/work credentials and only the minimized fixture fields documented in `docs/ADR-005-p1-p2-integrations.md`.

@@ -150,9 +150,9 @@ docker exec contexthub node dist/cli.js web-principal-link \
   --subject <TAILSCALE_USER_LOGIN> --client tim-reviewer-personal
 ```
 
-管理頁網址是 `https://<nas-tailscale-name>:8443/dashboard`；請使用 Tailscale DNS 名稱，不要用 `https://<tailscale-ip>:8443` 取代，因為 HTTPS 憑證與 identity proxy 都以 tailnet hostname 為準。只有在 Tailscale HTTPS reverse proxy 已配置後才開啟 `CONTROL_CENTER_ENABLED=true`、`CONTROL_CENTER_TAILSCALE_AUTH_ENABLED=true`、`CONTROL_CENTER_TRUSTED_PROXY=true`，並填入 `CONTROL_CENTER_CANONICAL_ORIGIN=https://<tailnet-host>:8443`。Enrollment 預設關閉；開啟 `AGENT_ENROLLMENT_ENABLED=true` 後，Agents 頁面可產生 single-use code，agent 透過 `/v1/agent-enrollment/exchange` 取得一次性 raw key。MCP OAuth 目前只保留 configuration 接縫，未經實測不宣稱支援；`LEGACY_API_KEYS_ENABLED=true` 是相容 fallback。
+管理頁網址是 `https://<nas-tailscale-name>:8443/dashboard`；請使用 Tailscale DNS 名稱，不要用 `https://<tailscale-ip>:8443` 取代，因為 HTTPS 憑證與 identity proxy 都以 tailnet hostname 為準。只有在 Tailscale HTTPS reverse proxy 已配置後才開啟 `CONTROL_CENTER_ENABLED=true`、`CONTROL_CENTER_TAILSCALE_AUTH_ENABLED=true`、`CONTROL_CENTER_TRUSTED_PROXY=true`，並填入 `CONTROL_CENTER_CANONICAL_ORIGIN=https://<tailnet-host>:8443`。Enrollment 預設關閉；開啟 `AGENT_ENROLLMENT_ENABLED=true` 後，Agents 頁面可產生 single-use code，agent 透過 `/v1/agent-enrollment/exchange` 取得一次性 raw key。MCP OAuth 已有 protected-resource 驗證接縫，但未經真實 issuer/客戶端實測不宣稱 live 支援；`LEGACY_API_KEYS_ENABLED=true` 是相容 fallback。
 
-19 個工具。讀取面：`compile_context`（依 intent、有效期、authority/freshness、ACL 與 token budget 產生短暫 package）、`search_context`（預設 hybrid：FTS5 + 本地向量 + structured entity，weighted RRF；結果帶 retrieval diagnostics、information_class/memory_kind/authority/trust_state）、`curation_suggestions`（只讀的 duplicate/conflict/stale/expired working_state 建議）、`get_current_context`、`get_recent_context`、`get_context_item`、`get_context_brief`、`list_context_sources`、`get_memory_history`（版本＋裁決史）、`my_candidates`（自己的待審）。
+21 個工具。讀取面：`compile_context`（依 intent、有效期、authority/freshness、ACL 與 token budget 產生短暫 package）、`search_context`（預設 hybrid：FTS5 + 本地向量 + structured entity，weighted RRF；結果帶 retrieval diagnostics、information_class/memory_kind/authority/trust_state）、`curation_suggestions`（只讀的 duplicate/conflict/stale/expired working_state 建議）、`get_changes`、`traverse_entity_graph`、`get_current_context`、`get_recent_context`、`get_context_item`、`get_context_brief`、`list_context_sources`、`get_memory_history`（版本＋裁決史）、`my_candidates`（自己的待審）。
 
 `search_context` 與 `compile_context` 支援 `information_classes`、`memory_kinds`、`entity_filters` 硬過濾；`entities` 仍是 query-time boost。REST `GET /v1/items` 對應 `information_class`、`memory_kind`、`entity_exact`。Tags 與 entities 會以 NFKC、空白、大小寫及重複值正規化；`context_items` 仍是唯一權威，`item_tag_index`／`item_entity_index` 是 migration v9 建立的可重建 projection。
 
@@ -202,8 +202,8 @@ src/
   http/    # Fastify:auth + /v1 routes(items/candidates/review/task-op/curate/state/
            #   history/audit/policies/clients/namespaces)+ /explore + /review
            #   + Control Center + health
-  mcp/     # MCP server(19 tools)+ Streamable HTTP 掛載(stateless,一 key 一 namespace)
-  db/      # SQLite+sqlite-vec 連線(synchronous=FULL、instance lock)+ migrations(v1–v9)
+  mcp/     # MCP server(21 tools)+ Streamable HTTP 掛載(stateless,一 key 一 namespace)
+  db/      # SQLite+sqlite-vec 連線(synchronous=FULL、instance lock)+ migrations(v1–v14)
   cli.ts   # create-client/.../reindex/retrieval-status/backup/purge/...
 scripts/   # retrieval-benchmark.ts、e2e.sh、restore.sh(NAS runbook)
 test/      # 100+ tests:隔離/信任/政策/稽核 fail-closed/idempotency/一致性/還原邊界

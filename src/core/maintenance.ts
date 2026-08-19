@@ -8,6 +8,9 @@ import type { DB } from '../db/connection.js';
 import { createItemsRepo } from './items-repo.js';
 import { normalizeEntity, normalizeTag } from './canonical.js';
 import { buildInfo } from '../build-info.js';
+import { createAuditRepo } from './audit-repo.js';
+import { verifyAuditChain } from './audit-chain.js';
+import { verifyAuditAnchor } from './audit-chain-admin.js';
 
 export const MIN_FREE_BYTES = 1_073_741_824;
 export const BACKUP_MAX_AGE_MS = 26 * 60 * 60 * 1000;
@@ -34,6 +37,7 @@ export interface BackupManifestV1 {
   };
   target_schema_version: number | null;
   verification: { quick_check: 'ok' };
+  audit_chain?: { row_count: number; latest_audit_id: number; root_hash: string; verified: boolean };
 }
 
 export interface MaintenanceRecordV1 {
@@ -115,6 +119,11 @@ export function createBackup(
     fs.rmSync(temp, { force: true });
     throw err;
   }
+  const auditDb = new Database(destination, { readonly: true, fileMustExist: true });
+  const auditChain = auditDb.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'audit_chain'").get()
+    ? verifyAuditChain(auditDb)
+    : undefined;
+  auditDb.close();
   const manifest: BackupManifestV1 = {
     format: 'contexthub-backup-manifest/v1',
     backup_id: `bkp_${randomUUID()}`,
@@ -124,6 +133,7 @@ export function createBackup(
     runtime: runtime(),
     target_schema_version: options.targetSchemaVersion ?? null,
     verification: { quick_check: quickCheck(destination) },
+    audit_chain: auditChain,
   };
   atomicWrite(path.join(options.outDir, `${base}.manifest.json`), manifest);
   return manifest;
@@ -245,13 +255,33 @@ export function runDoctor(db: DB, dataDir: string): DoctorReport {
   }
   try {
     db.exec('SAVEPOINT doctor_audit_probe');
-    db.prepare('INSERT INTO audit_log (ts, namespace, client_id, action, outcome, details) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(new Date().toISOString(), '*', 'doctor', 'maintenance.doctor_probe', 'allow', JSON.stringify({ probe: true }));
+    createAuditRepo(db).log({ namespace: '*', clientId: 'doctor', action: 'maintenance.doctor_probe', outcome: 'allow', details: { probe: true } });
     db.exec('ROLLBACK TO doctor_audit_probe; RELEASE doctor_audit_probe');
     checks.audit_writable = { status: 'pass', message: 'audit table accepts transactional writes', remediation: 'restore write access to the database and data volume' };
   } catch (err) {
     try { db.exec('ROLLBACK TO doctor_audit_probe; RELEASE doctor_audit_probe'); } catch { /* best effort */ }
     checks.audit_writable = { status: 'fail', message: `audit write probe failed: ${(err as Error).message}`, remediation: 'restore write access to the database and data volume' };
+  }
+  try {
+    const chain = verifyAuditChain(db);
+    checks.audit_chain = {
+      status: chain.verified ? 'pass' : 'fail',
+      message: chain.verified ? 'audit hash chain is intact' : 'audit hash chain is incomplete or invalid',
+      remediation: 'run `node dist/cli.js audit-chain-extend` only after reviewing the rollback tail, then re-run doctor',
+      details: { row_count: chain.row_count, latest_audit_id: chain.latest_audit_id, root_hash: chain.root_hash },
+    };
+    const anchorPath = process.env.AUDIT_ANCHOR_PATH;
+    if (chain.verified && anchorPath) {
+      try {
+        if (path.resolve(anchorPath).startsWith(`${path.resolve(dataDir)}${path.sep}`)) throw new Error('audit anchor path must be outside DATA_DIR');
+        const anchor = verifyAuditAnchor(db, anchorPath);
+        if (!anchor.valid) checks.audit_chain = { status: 'fail', message: anchor.message, remediation: 'verify the offsite anchor and restore/extend only after owner review' };
+      } catch (err) {
+        checks.audit_chain = { status: 'fail', message: `audit anchor check failed: ${(err as Error).message}`, remediation: 'restore a verified offsite anchor before accepting writes' };
+      }
+    }
+  } catch (err) {
+    checks.audit_chain = { status: 'fail', message: `audit chain check failed: ${(err as Error).message}`, remediation: 'inspect the audit chain and restore a verified backup if needed' };
   }
   try {
     const rows = db.prepare('SELECT version FROM schema_migrations ORDER BY version').all() as Array<{ version: number }>;
@@ -337,6 +367,15 @@ export function restoreDrill(manifestFile: string, dataDir: string): Maintenance
     db.prepare('SELECT COUNT(*) AS n FROM item_versions').get();
     db.prepare('SELECT COUNT(*) AS n FROM audit_log').get();
     db.prepare('SELECT COUNT(*) AS n FROM idempotency_records').get();
+    const chain = verifyAuditChain(db);
+    const manifestChain = verified.manifest.audit_chain;
+    const manifestMatches = !manifestChain || (
+      manifestChain.verified === chain.verified &&
+      manifestChain.row_count === chain.row_count &&
+      manifestChain.latest_audit_id === chain.latest_audit_id &&
+      manifestChain.root_hash === chain.root_hash
+    );
+    checks.push({ name: 'audit_chain', status: chain.verified && manifestMatches ? 'pass' : 'fail' });
     checks.push({ name: 'authorized_query_history_audit_idempotency', status: 'pass' });
     checks.push({ name: 'in_process_health', status: 'pass' });
   } catch {

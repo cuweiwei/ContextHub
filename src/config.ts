@@ -36,6 +36,10 @@ const envSchema = z.object({
   OAUTH_ISSUER: optionalUrl,
   OAUTH_AUDIENCE_BASE: optionalUrl,
   OAUTH_JWKS_URI: optionalUrl,
+  WEBHOOK_ALLOWED_HOSTS: z.string().default(''),
+  WEBHOOK_SIGNING_MASTER_KEY: z.string().optional(),
+  AUDIT_ANCHOR_PATH: z.string().optional(),
+  CONTEXTHUB_ALIAS_FILE: z.string().optional(),
 });
 
 export interface Config {
@@ -59,6 +63,10 @@ export interface Config {
   oauthIssuer: string | undefined;
   oauthAudienceBase: string | undefined;
   oauthJwksUri: string | undefined;
+  webhookAllowedHosts?: string[];
+  webhookSigningMasterKey?: string;
+  auditAnchorPath?: string;
+  aliasFile?: string;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -85,5 +93,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     oauthIssuer: parsed.OAUTH_ISSUER,
     oauthAudienceBase: parsed.OAUTH_AUDIENCE_BASE,
     oauthJwksUri: parsed.OAUTH_JWKS_URI,
+    webhookAllowedHosts: parsed.WEBHOOK_ALLOWED_HOSTS.split(',').map((value) => value.trim()).filter(Boolean),
+    webhookSigningMasterKey: parsed.WEBHOOK_SIGNING_MASTER_KEY || undefined,
+    auditAnchorPath: parsed.AUDIT_ANCHOR_PATH || undefined,
+    aliasFile: parsed.CONTEXTHUB_ALIAS_FILE || undefined,
   };
 }

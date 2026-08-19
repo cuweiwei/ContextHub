@@ -24,7 +24,7 @@ try {
   const response = await page.goto(`http://127.0.0.1:${port}/health`);
   if (!response || !response.ok()) throw new Error(`health page returned ${response?.status()}`);
   const body = await response.json();
-  if (body.version !== '0.7.0' || body.build_commit !== 'unknown') throw new Error('build metadata mismatch');
+  if (body.version !== '0.9.0' || body.build_commit !== 'unknown') throw new Error('build metadata mismatch');
   await browser.close();
   console.log('Playwright browser smoke: pass');
 } finally {

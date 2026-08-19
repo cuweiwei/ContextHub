@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type Database from 'better-sqlite3';
 import { seedPersonalPolicy, seedWorkPolicy, validatePolicy } from '../core/policy.js';
+import { appendAuditChainLink } from '../core/audit-chain.js';
 import { writePreMigrationSnapshot } from './backup.js';
 
 // Migrations are embedded as strings so the compiled dist/ needs no extra
@@ -568,6 +569,218 @@ const MIGRATIONS: {
         }
       }
     },
+  },
+  {
+    version: 10,
+    name: 'tamper-evident-audit-chain',
+    sql: `
+      -- The chain is a separate projection so an older image can still read
+      -- and write audit_log during a controlled rollback. The next image
+      -- refuses new writes until an explicit chain extension repairs that
+      -- rollback tail.
+      CREATE TABLE audit_chain (
+        audit_id INTEGER PRIMARY KEY REFERENCES audit_log(id) ON DELETE CASCADE,
+        prev_hash TEXT NOT NULL,
+        row_hash TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE audit_chain_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        latest_audit_id INTEGER NOT NULL DEFAULT 0,
+        root_hash TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `,
+    post: (db) => {
+      const rows = db.prepare('SELECT id, ts, namespace, client_id, action, item_id, outcome, details FROM audit_log ORDER BY id').all() as Array<{
+        id: number; ts: string; namespace: string; client_id: string; action: string; item_id: string | null; outcome: string; details: string | null;
+      }>;
+      const insertState = db.prepare('INSERT INTO audit_chain_state (id, latest_audit_id, root_hash, updated_at) VALUES (1, 0, ?, ?)');
+      insertState.run('0'.repeat(64), new Date().toISOString());
+      for (const row of rows) appendAuditChainLink(db, row);
+    },
+  },
+  {
+    version: 11,
+    name: 'migration-campaigns-and-namespace-portability',
+    sql: `
+      CREATE TABLE migration_campaigns (
+        id TEXT PRIMARY KEY,
+        namespace TEXT NOT NULL REFERENCES namespaces(id),
+        name TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('draft','running','paused','complete','partial','failed')),
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        last_mutation_at TEXT NOT NULL,
+        fresh_query_verified_at TEXT,
+        legacy_store_verified_at TEXT,
+        backup_restore_verified_at TEXT
+      );
+      CREATE INDEX idx_migration_campaigns_ns ON migration_campaigns(namespace, updated_at);
+      CREATE TABLE migration_sources (
+        id TEXT PRIMARY KEY,
+        campaign_id TEXT NOT NULL REFERENCES migration_campaigns(id) ON DELETE CASCADE,
+        source_key TEXT NOT NULL,
+        domain TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('pending','inaccessible','unknown','ready','complete')),
+        expected_count INTEGER,
+        imported_count INTEGER NOT NULL DEFAULT 0,
+        duplicate_count INTEGER NOT NULL DEFAULT 0,
+        excluded_count INTEGER NOT NULL DEFAULT 0,
+        candidate_pending_count INTEGER NOT NULL DEFAULT 0,
+        verified_at TEXT,
+        UNIQUE(campaign_id, source_key)
+      );
+      CREATE TABLE migration_ledger (
+        id TEXT PRIMARY KEY,
+        campaign_id TEXT NOT NULL REFERENCES migration_campaigns(id) ON DELETE CASCADE,
+        source_key TEXT NOT NULL,
+        external_ref_hash TEXT NOT NULL,
+        disposition TEXT NOT NULL CHECK (disposition IN ('imported','duplicate','excluded','pending','submitted')),
+        candidate_item_id TEXT,
+        exclusion_reason TEXT,
+        created_at TEXT NOT NULL,
+        UNIQUE(campaign_id, source_key, external_ref_hash)
+      );
+      CREATE INDEX idx_migration_ledger_campaign ON migration_ledger(campaign_id, disposition);
+      CREATE TABLE namespace_import_runs (
+        id TEXT PRIMARY KEY,
+        namespace TEXT NOT NULL REFERENCES namespaces(id),
+        mode TEXT NOT NULL CHECK (mode IN ('candidates','trusted')),
+        collision TEXT NOT NULL CHECK (collision IN ('fail','skip','remap')),
+        archive_sha256 TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('dry_run','applied','rolled_back','failed')),
+        snapshot_path TEXT,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        completed_at TEXT,
+        imported_count INTEGER NOT NULL DEFAULT 0,
+        skipped_count INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE import_provenance (
+        run_id TEXT NOT NULL REFERENCES namespace_import_runs(id) ON DELETE CASCADE,
+        item_id TEXT NOT NULL REFERENCES context_items(id),
+        source_namespace TEXT NOT NULL,
+        source_item_id TEXT NOT NULL,
+        source_revision INTEGER NOT NULL,
+        source_trust_state TEXT NOT NULL,
+        source_version TEXT,
+        PRIMARY KEY(run_id, item_id)
+      );
+    `,
+  },
+  {
+    version: 12,
+    name: 'connectors-change-feed-notifications',
+    sql: `
+      CREATE TABLE change_events (
+        cursor INTEGER PRIMARY KEY AUTOINCREMENT,
+        namespace TEXT NOT NULL REFERENCES namespaces(id),
+        action TEXT NOT NULL,
+        entity_kind TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        revision INTEGER,
+        occurred_at TEXT NOT NULL
+      );
+      CREATE INDEX idx_change_events_ns_cursor ON change_events(namespace, cursor);
+      CREATE TABLE change_subscriptions (
+        id TEXT PRIMARY KEY,
+        namespace TEXT NOT NULL REFERENCES namespaces(id),
+        kind TEXT NOT NULL CHECK (kind IN ('webhook','telegram')),
+        endpoint TEXT,
+        event_categories TEXT NOT NULL DEFAULT '[]',
+        status TEXT NOT NULL CHECK (status IN ('active','paused','dead_letter')),
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        pending_count INTEGER NOT NULL DEFAULT 0,
+        last_cursor INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE change_deliveries (
+        id TEXT PRIMARY KEY,
+        subscription_id TEXT NOT NULL REFERENCES change_subscriptions(id) ON DELETE CASCADE,
+        cursor INTEGER,
+        payload_metadata TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('pending','delivered','retry','dead_letter')),
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at TEXT NOT NULL,
+        last_error_code TEXT,
+        created_at TEXT NOT NULL,
+        delivered_at TEXT
+      );
+      CREATE INDEX idx_change_deliveries_due ON change_deliveries(status, next_attempt_at);
+      CREATE TABLE connector_runs (
+        id TEXT PRIMARY KEY,
+        namespace TEXT NOT NULL REFERENCES namespaces(id),
+        connector TEXT NOT NULL,
+        profile TEXT NOT NULL CHECK (profile = 'connector-producer'),
+        checkpoint_key TEXT NOT NULL,
+        checkpoint_value TEXT,
+        status TEXT NOT NULL CHECK (status IN ('running','ok','stale','failed')),
+        counts TEXT NOT NULL DEFAULT '{}',
+        started_at TEXT NOT NULL,
+        finished_at TEXT
+      );
+    `,
+  },
+  {
+    version: 13,
+    name: 'oauth-resource-server-and-runtime-inputs',
+    sql: `
+      CREATE TABLE oauth_bindings (
+        issuer TEXT NOT NULL,
+        subject TEXT NOT NULL,
+        namespace TEXT NOT NULL REFERENCES namespaces(id),
+        client_id TEXT NOT NULL REFERENCES clients(id),
+        created_at TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        PRIMARY KEY (issuer, subject)
+      );
+      CREATE INDEX idx_oauth_bindings_client ON oauth_bindings(client_id);
+    `,
+  },
+  {
+    version: 14,
+    name: 'consolidation-entity-graph-evidence-projections',
+    sql: `
+      ALTER TABLE import_provenance ADD COLUMN imported_revision INTEGER;
+      CREATE TABLE reviewer_suggestions (
+        id TEXT PRIMARY KEY,
+        namespace TEXT NOT NULL REFERENCES namespaces(id),
+        kind TEXT NOT NULL CHECK (kind IN ('merge','reverify','archive','supersede')),
+        item_ids TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('open','dismissed','resolved')),
+        created_at TEXT NOT NULL,
+        resolved_at TEXT
+      );
+      CREATE INDEX idx_reviewer_suggestions_ns_status ON reviewer_suggestions(namespace, status, created_at);
+      CREATE TABLE entity_graph_nodes (
+        namespace TEXT NOT NULL REFERENCES namespaces(id),
+        entity_key TEXT NOT NULL,
+        label TEXT NOT NULL,
+        evidence_item_id TEXT NOT NULL REFERENCES context_items(id),
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(namespace, entity_key)
+      );
+      CREATE TABLE entity_graph_aliases (
+        namespace TEXT NOT NULL REFERENCES namespaces(id),
+        entity_key TEXT NOT NULL,
+        alias TEXT NOT NULL,
+        evidence_item_id TEXT NOT NULL REFERENCES context_items(id),
+        PRIMARY KEY(namespace, entity_key, alias)
+      );
+      CREATE TABLE entity_graph_edges (
+        namespace TEXT NOT NULL REFERENCES namespaces(id),
+        from_entity TEXT NOT NULL,
+        relation TEXT NOT NULL,
+        to_entity TEXT NOT NULL,
+        evidence_item_id TEXT NOT NULL REFERENCES context_items(id),
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(namespace, from_entity, relation, to_entity)
+      );
+    `,
   },
 ];
 

@@ -85,6 +85,7 @@ describe('MCP endpoint', () => {
       'compile_context',
       'curate_note',
       'curation_suggestions',
+      'get_changes',
       'get_context_brief',
       'get_context_item',
       'get_current_context',
@@ -100,6 +101,7 @@ describe('MCP endpoint', () => {
       'revise_my_candidate',
       'save_memory',
       'search_context',
+      'traverse_entity_graph',
       'update_operational_state',
     ]);
 

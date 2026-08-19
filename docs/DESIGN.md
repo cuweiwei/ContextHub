@@ -214,7 +214,7 @@ Compiler 回傳 `package_id`、sections、constraints、estimated tokens 與 `re
 | `POST /v1/clients`(namespace+principal_kind 必填,選配 profile)、`POST /v1/clients/:id/rotate-key`、`PATCH /v1/clients/:id`、`GET/POST /v1/namespaces`、`GET/PUT /v1/state-schemas/:id` | 管理(admin) |
 | `GET /health` | 無敏感 readiness（service/version/build/schema/model 與 audit/migration/projection/disk 狀態） |
 
-## 11. MCP tools(19 個)
+## 11. MCP tools(21 個)
 
 Endpoint `POST /mcp`(Streamable HTTP stateless)。連線=namespace 邊界。
 

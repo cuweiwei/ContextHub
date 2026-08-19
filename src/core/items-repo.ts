@@ -477,6 +477,21 @@ export function createItemsRepo(
     return (evidenceSelect.all(id) as { evidence_id: string }[]).map((r) => r.evidence_id);
   }
 
+  function evidenceClosureReadable(id: string, access: ReadAccess): boolean {
+    const seen = new Set<string>();
+    const active = new Set<string>();
+    const walk = (current: string, depth: number): boolean => {
+      if (depth > 8 || seen.size >= 100 || active.has(current)) return false;
+      if (seen.has(current)) return true;
+      seen.add(current); active.add(current);
+      const row = selectById.get(current) as ItemRow | undefined;
+      if (!row || row.deleted || row.trust_state !== 'accepted' || row.namespace !== access.namespace || (row.expires_at && row.expires_at <= new Date().toISOString()) || (row.sensitivity === 'private' && access.maxSensitivity !== 'private') || (access.readSources !== null && !access.readSources.includes(row.source))) { active.delete(current); return false; }
+      for (const child of derivedFrom(current)) if (!walk(child, depth + 1)) { active.delete(current); return false; }
+      active.delete(current); return true;
+    };
+    return walk(id, 1);
+  }
+
   /**
    * Validates evidence references for an insight write. Nonexistent,
    * unreadable, and cross-namespace evidence all produce the SAME error so
@@ -485,10 +500,15 @@ export function createItemsRepo(
    */
   function validateEvidence(ids: string[], writer: WriteContext, selfId?: string): Sensitivity {
     let maxSensitivity: Sensitivity = 'normal';
-    for (const id of new Set(ids)) {
-      if (selfId && id === selfId) {
-        throw new ValidationError('an insight cannot cite itself as evidence');
-      }
+    const visited = new Set<string>();
+    const active = new Set<string>();
+    const walk = (id: string, depth: number): void => {
+      if (depth > 8) throw new ValidationError('insight evidence closure exceeds maximum depth 8');
+      if (active.has(id)) throw new ValidationError('insight evidence closure contains a cycle');
+      if (visited.has(id)) return;
+      visited.add(id);
+      active.add(id);
+      if (selfId && id === selfId) throw new ValidationError('an insight cannot cite itself as evidence');
       const row = selectById.get(id) as ItemRow | undefined;
       const readable =
         row &&
@@ -498,13 +518,15 @@ export function createItemsRepo(
       if (!readable) {
         throw new ValidationError(`evidence item "${id}" does not exist or is not readable by this client`);
       }
-      if (row!.type === 'insight') {
-        throw new ValidationError(
-          'insights cannot be used as evidence (evidence must reference non-insight context items)',
-        );
-      }
       if (row!.sensitivity === 'private') maxSensitivity = 'private';
-    }
+      if (row!.type === 'insight') {
+        if (row!.trust_state !== 'accepted') throw new ValidationError('only accepted insights may be used as evidence');
+        for (const child of derivedFrom(id)) walk(child, depth + 1);
+      }
+      active.delete(id);
+    };
+    for (const id of new Set(ids)) walk(id, 1);
+    if (visited.size > 100) throw new ValidationError('insight evidence closure exceeds 100 nodes');
     return maxSensitivity;
   }
 
@@ -834,6 +856,7 @@ export function createItemsRepo(
         }
       }
     }
+    if (row.type === 'insight' && row.trust_state === 'accepted' && !access.isAdmin && !evidenceClosureReadable(row.id, access)) return null;
     const item = rowToItem(row);
     if (item.type === 'insight') item.derived_from = derivedFrom(item.id);
     return item;
@@ -1014,6 +1037,10 @@ export function createItemsRepo(
       db.prepare('DELETE FROM insight_evidence WHERE insight_id = ? OR evidence_id = ?').run(id, id);
       db.prepare('DELETE FROM item_versions WHERE item_id = ?').run(id);
       db.prepare('DELETE FROM item_reviews WHERE item_id = ?').run(id);
+      db.prepare('DELETE FROM import_provenance WHERE item_id = ?').run(id);
+      db.prepare('DELETE FROM entity_graph_nodes WHERE evidence_item_id = ?').run(id);
+      db.prepare('DELETE FROM entity_graph_aliases WHERE evidence_item_id = ?').run(id);
+      db.prepare('DELETE FROM entity_graph_edges WHERE evidence_item_id = ?').run(id);
       db.prepare('DELETE FROM context_items WHERE id = ?').run(id);
       return true;
     })();
@@ -1125,6 +1152,20 @@ export function createItemsRepo(
           AND ev.source NOT IN (${access.readSources.map(() => '?').join(',')})
       )`);
       params.push(...access.readSources);
+      where.push(`NOT EXISTS (
+        WITH RECURSIVE evidence_closure(id) AS (
+          SELECT ie.evidence_id FROM insight_evidence ie WHERE ie.insight_id = ${alias}.id
+          UNION
+          SELECT ie2.evidence_id FROM insight_evidence ie2 JOIN evidence_closure c ON ie2.insight_id = c.id
+        )
+        SELECT 1 FROM evidence_closure c JOIN context_items ev ON ev.id = c.id
+        WHERE ev.source NOT IN (${access.readSources.map(() => '?').join(',')})
+           OR ev.trust_state != 'accepted'
+           OR ev.deleted = 1
+           OR (ev.expires_at IS NOT NULL AND ev.expires_at <= ?)
+           OR (ev.sensitivity = 'private' AND ? = 'normal')
+      )`);
+      params.push(...access.readSources, new Date().toISOString(), access.maxSensitivity);
     }
     if (effectiveSources?.length) {
       where.push(`${alias}.source IN (${effectiveSources.map(() => '?').join(',')})`);

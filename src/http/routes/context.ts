@@ -19,6 +19,7 @@ const compileBodySchema = z.object({
   memory_kinds: z.array(z.enum(['fact', 'preference', 'decision', 'experience', 'procedure', 'relationship', 'working_state'])).max(7).optional(),
   include_private: z.boolean().default(false),
   state_keys: z.array(z.string().min(1).max(200)).max(20).optional(),
+  runtime_inputs: z.array(z.object({ kind: z.enum(['system_constraint', 'tool_result']), value: z.string().max(10_240) })).max(20).optional(),
 });
 
 const outcomeBodySchema = z.object({
@@ -55,6 +56,7 @@ export function registerContextRoutes(app: FastifyInstance, deps: AppDeps): void
         },
         stateKeys: body.state_keys,
         entities: body.entities,
+        runtimeInputs: body.runtime_inputs,
       });
       return reply.send({
         ...contextPackage,

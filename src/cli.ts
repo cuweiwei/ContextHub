@@ -18,6 +18,9 @@
  *   npm run cli -- reindex          # rebuild FTS + vectors (MANDATORY after restore/upgrade)
  *   npm run cli -- retrieval-status # vector extension/model/index coverage
  *   npm run cli -- backup [--out /data/backups]
+ *   npm run cli -- audit-verify | audit-anchor | audit-chain-extend
+ *   npm run cli -- namespace-export --namespace personal --out archive.jsonl
+ *   npm run cli -- namespace-import --archive archive.jsonl --target-namespace personal
  *   npm run cli -- purge --id 01K...
  *   npm run cli -- idempotency-gc [--days 90]
  *   npm run cli -- seed-demo
@@ -26,7 +29,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { loadConfig } from './config.js';
 import { openDatabase, openExistingDatabase } from './db/connection.js';
 import { createAuditRepo } from './core/audit-repo.js';
@@ -40,6 +43,8 @@ import { ADMIN_CLIENT } from './http/auth.js';
 import { createWebPrincipalsRepo } from './core/web-principals-repo.js';
 import { createBackup, restoreDrill, runDoctor, writeMaintenanceRecord } from './core/maintenance.js';
 import { buildInfo } from './build-info.js';
+import { exportNamespace, importNamespace } from './core/namespace-archive.js';
+import { auditChainExtend, verifyAuditAnchor, writeAuditAnchor } from './core/audit-chain-admin.js';
 
 function parseFlags(argv: string[]): Record<string, string> {
   const flags: Record<string, string> = {};
@@ -189,12 +194,71 @@ function main(): void {
   const itemsRepo = createItemsRepo(db);
   const policiesRepo = createPoliciesRepo(db);
   const auditRepo = createAuditRepo(db);
-  const commands = createCommands({ db, itemsRepo, clientsRepo, policiesRepo, auditRepo });
+  const commands = createCommands({ db, itemsRepo, clientsRepo, policiesRepo, auditRepo, webhookAllowedHosts: config.webhookAllowedHosts, webhookSigningMasterKey: config.webhookSigningMasterKey });
   const webPrincipalsRepo = createWebPrincipalsRepo(db);
   /** The CLI runs on the DB host as the owner — same authority as the admin token. */
   const admin = ADMIN_CLIENT;
 
   switch (command) {
+    case 'audit-verify': {
+      const result = auditRepo.verifyChain();
+      console.log(JSON.stringify(result, null, 2));
+      process.exitCode = result.verified ? 0 : 2;
+      break;
+    }
+    case 'audit-chain-extend': {
+      const result = auditChainExtend(db);
+      console.log(JSON.stringify(result, null, 2));
+      process.exitCode = result.status.verified ? 0 : 2;
+      break;
+    }
+    case 'audit-anchor': {
+      if (!flags.out) { console.error('usage: audit-anchor --out <path> [--backup-id <id>]'); process.exit(2); }
+      const anchor = writeAuditAnchor(db, flags.out, buildInfo.version, buildInfo.schema_version, flags['backup-id']);
+      console.log(JSON.stringify(anchor, null, 2));
+      break;
+    }
+    case 'namespace-export': {
+      if (!flags.namespace || !flags.out) { console.error('usage: namespace-export --namespace <ns> --out <archive.jsonl>'); process.exit(2); }
+      const result = exportNamespace(db, flags.namespace, flags.out);
+      console.log(JSON.stringify(result, null, 2));
+      break;
+    }
+    case 'oauth-bind': {
+      if (!flags.issuer || !flags.subject || !flags.client) { console.error('usage: oauth-bind --issuer <issuer> --subject <subject> --client <client-id>'); process.exit(2); }
+      const target = clientsRepo.get(flags.client);
+      if (!target) { console.error('client not found'); process.exit(2); }
+      db.prepare('INSERT INTO oauth_bindings (issuer, subject, namespace, client_id, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(issuer, subject) DO UPDATE SET namespace = excluded.namespace, client_id = excluded.client_id').run(flags.issuer, flags.subject, target.namespace, target.id, new Date().toISOString(), admin.id);
+      auditRepo.log({ namespace: target.namespace, clientId: admin.id, action: 'admin.oauth_bind', outcome: 'allow', details: { issuer: flags.issuer, subject_hash: createHash('sha256').update(flags.subject).digest('hex').slice(0, 16), client_id: target.id } });
+      console.log(`OAuth subject bound to ${target.id} (${target.namespace})`);
+      break;
+    }
+    case 'namespace-import': {
+      if (!flags.archive || !flags['target-namespace']) { console.error('usage: namespace-import --archive <archive.jsonl> --target-namespace <ns> --mode candidates|trusted --collision fail|skip|remap [--source-map map.json] [--dry-run]'); process.exit(2); }
+      const mode = flags.mode === 'trusted' ? 'trusted' : flags.mode === 'candidates' || flags.mode === undefined ? 'candidates' : null;
+      const collision = flags.collision === 'skip' || flags.collision === 'remap' || flags.collision === 'fail' || flags.collision === undefined ? (flags.collision ?? 'fail') : null;
+      if (!mode || !collision) { console.error('invalid mode or collision'); process.exit(2); }
+      if (mode === 'trusted' && flags['break-glass'] !== 'true') { console.error('trusted import requires --break-glass true on the NAS host'); process.exit(2); }
+      let sourceMap: Record<string, string> | undefined;
+      if (flags['source-map']) sourceMap = JSON.parse(fs.readFileSync(flags['source-map'], 'utf8')) as Record<string, string>;
+      const snapshotDir = path.join(config.dataDir, 'backups');
+      const snapshot = createBackup(db, { outDir: snapshotDir });
+      const result = importNamespace(db, commands, path.resolve(flags.archive), flags['target-namespace'], { sourceMap, mode, collision, dryRun: flags['dry-run'] === 'true', snapshotPath: snapshot.database.file });
+      console.log(JSON.stringify(result, null, 2));
+      break;
+    }
+    case 'namespace-import-rollback': {
+      if (!flags.run) { console.error('usage: namespace-import-rollback --run <run_id>'); process.exit(2); }
+      const run = db.prepare("SELECT id, mode, status FROM namespace_import_runs WHERE id = ?").get(flags.run) as { id: string; mode: string; status: string } | undefined;
+      if (!run) { console.error('no such import run'); process.exit(2); }
+      if (run.mode !== 'candidates') { console.error('trusted import rollback requires restoring its snapshot'); process.exit(2); }
+      const rows = db.prepare("SELECT p.item_id, p.imported_revision, i.revision, i.trust_state FROM import_provenance p JOIN context_items i ON i.id = p.item_id WHERE p.run_id = ?").all(flags.run) as Array<{ item_id: string; imported_revision: number | null; revision: number; trust_state: string }>;
+      let purged = 0;
+      for (const row of rows) if (row.trust_state === 'candidate' && row.imported_revision === row.revision) { const result = commands.purgeItem(admin, row.item_id, `rollback:${flags.run}:${row.item_id}`); if (result.purged) purged += 1; }
+      db.prepare("UPDATE namespace_import_runs SET status = 'rolled_back', completed_at = ? WHERE id = ?").run(new Date().toISOString(), flags.run);
+      console.log(JSON.stringify({ run_id: flags.run, purged }, null, 2));
+      break;
+    }
     case 'create-client': {
       const { id, name, namespace, scopes, profile } = flags;
       const principalKind = flags['principal-kind'];
@@ -445,7 +509,7 @@ function main(): void {
     }
     default:
       console.error(
-        'commands: create-client | list-clients | rotate-key | disable-client | create-namespace | policy-show | policy-apply | register-state-schema | review | candidates | audit | reindex | retrieval-status | backup | restore-drill | doctor | purge | idempotency-gc | seed-demo',
+        'commands: create-client | list-clients | rotate-key | disable-client | create-namespace | policy-show | policy-apply | register-state-schema | review | candidates | audit | audit-verify | audit-anchor | audit-chain-extend | oauth-bind | namespace-export | namespace-import | namespace-import-rollback | reindex | retrieval-status | backup | restore-drill | doctor | purge | idempotency-gc | seed-demo',
       );
       process.exit(1);
   }

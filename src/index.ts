@@ -11,6 +11,7 @@ import { createWebSessionsRepo } from './core/web-sessions-repo.js';
 import { createEnrollmentsRepo } from './core/enrollments-repo.js';
 import { createClientActivityRepo } from './core/client-activity-repo.js';
 import { createControlCommands } from './core/control-commands.js';
+import { NotificationDispatcher } from './core/notifications.js';
 
 const config = loadConfig();
 // Single-active-instance guard: a second server on the same data dir must
@@ -22,7 +23,7 @@ const itemsRepo = createItemsRepo(db);
 const clientsRepo = createClientsRepo(db);
 const policiesRepo = createPoliciesRepo(db);
 const auditRepo = createAuditRepo(db);
-const commands = createCommands({ db, itemsRepo, clientsRepo, policiesRepo, auditRepo });
+const commands = createCommands({ db, itemsRepo, clientsRepo, policiesRepo, auditRepo, webhookAllowedHosts: config.webhookAllowedHosts, webhookSigningMasterKey: config.webhookSigningMasterKey });
 const webPrincipalsRepo = createWebPrincipalsRepo(db);
 const webSessionsRepo = createWebSessionsRepo(db);
 const enrollmentsRepo = createEnrollmentsRepo(db);
@@ -30,12 +31,16 @@ const clientActivityRepo = createClientActivityRepo(db);
 const controlCommands = createControlCommands({ commands, clientsRepo, auditRepo, webPrincipalsRepo, enrollmentsRepo, policiesRepo });
 
 const app = buildApp({ db, config, itemsRepo, clientsRepo, policiesRepo, auditRepo, commands, webPrincipalsRepo, webSessionsRepo, enrollmentsRepo, clientActivityRepo, controlCommands });
+const notificationDispatcher = new NotificationDispatcher(db, { allowedHosts: config.webhookAllowedHosts ?? [], signingMasterKey: config.webhookSigningMasterKey });
+const notificationTimer = setInterval(() => { void notificationDispatcher.dispatchDue().catch(() => undefined); }, 60_000);
+notificationTimer.unref();
 
 async function shutdown(signal: string): Promise<void> {
   app.log.info(`${signal} received, shutting down`);
   await app.close();
   db.close();
   instanceLock.close();
+  clearInterval(notificationTimer);
   process.exit(0);
 }
 process.on('SIGINT', () => void shutdown('SIGINT'));

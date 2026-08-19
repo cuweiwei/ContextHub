@@ -26,6 +26,9 @@ export const CAPABILITIES = [
   'state.write',
   'audit.read',
   'policy.manage',
+  'change.read',
+  'change.manage',
+  'connector.sync',
 ] as const;
 export type Capability = (typeof CAPABILITIES)[number];
 
@@ -78,6 +81,19 @@ export const policyV1Schema = z
 export type PolicyV1 = z.infer<typeof policyV1Schema>;
 export type CreateRule = z.infer<typeof createRuleSchema>;
 export type StateRule = z.infer<typeof stateRuleSchema>;
+
+export type PolicySimulationCase =
+  | { kind: 'capability'; client_id: string; capability: Capability }
+  | { kind: 'create' | 'create_rule'; client_id: string; item_type: string }
+  | { kind: 'state_read' | 'state_write'; client_id: string; state_key: string; schema_id?: string }
+  | { kind: 'batch'; client_id: string; capability: Capability; item_type?: string; state_key?: string };
+
+export interface PolicySimulationResult {
+  allowed: boolean;
+  reason_code: 'allowed' | 'unknown_client' | 'missing_capability' | 'missing_create_rule' | 'missing_state_rule' | 'schema_mismatch';
+  matched_rule_id: string | null;
+  trust_state: 'candidate' | 'accepted' | null;
+}
 
 export interface PolicyValidationDeps {
   /** Client ids that exist in THIS namespace (cross-namespace refs are invalid). */
@@ -152,6 +168,31 @@ export function stateRuleFor(policy: PolicyV1, stateKey: string): StateRule | nu
   return policy.state_rules.find((r) => r.state_key === stateKey) ?? null;
 }
 
+export function simulatePolicy(policy: PolicyV1, input: PolicySimulationCase): PolicySimulationResult {
+  const clientExists = new Set([
+    ...policy.grants.map((grant) => grant.client_id),
+    ...policy.create_rules.map((rule) => rule.client_id),
+    ...policy.state_rules.flatMap((rule) => [...rule.read_clients, ...rule.write_clients]),
+  ]).has(input.client_id);
+  if (!clientExists) return { allowed: false, reason_code: 'unknown_client', matched_rule_id: null, trust_state: null };
+
+  if (input.kind === 'capability' || input.kind === 'batch') {
+    const allowed = capabilitiesFor(policy, input.client_id).has(input.capability);
+    return { allowed, reason_code: allowed ? 'allowed' : 'missing_capability', matched_rule_id: null, trust_state: null };
+  }
+  if (input.kind === 'create' || input.kind === 'create_rule') {
+    const rule = createRuleFor(policy, input.client_id, input.item_type);
+    if (!rule) return { allowed: false, reason_code: 'missing_create_rule', matched_rule_id: null, trust_state: null };
+    return { allowed: true, reason_code: 'allowed', matched_rule_id: rule.rule_id, trust_state: rule.create_as };
+  }
+  const stateInput = input as Extract<PolicySimulationCase, { kind: 'state_read' | 'state_write' }>;
+  const rule = stateRuleFor(policy, stateInput.state_key);
+  if (!rule) return { allowed: false, reason_code: 'missing_state_rule', matched_rule_id: null, trust_state: null };
+  if (stateInput.schema_id && stateInput.schema_id !== rule.schema_id) return { allowed: false, reason_code: 'schema_mismatch', matched_rule_id: rule.rule_id, trust_state: null };
+  const allowed = (stateInput.kind === 'state_read' ? rule.read_clients : rule.write_clients).includes(stateInput.client_id);
+  return { allowed, reason_code: allowed ? 'allowed' : 'missing_capability', matched_rule_id: rule.rule_id, trust_state: null };
+}
+
 /**
  * Minimal declarative schema for operational-state values (deliberately NOT
  * full JSON Schema — no new dependencies, no ambiguity). Shape:
@@ -197,7 +238,7 @@ export function validateStateValue(schema: StateValueSchema, value: unknown): st
  * migration seed. Applying a profile writes a NEW policy version (grants stay
  * explicit and versioned; profiles are shorthand, not hidden defaults).
  */
-export const GRANT_PROFILES = ['agent-default', 'app-producer', 'reviewer', 'none'] as const;
+export const GRANT_PROFILES = ['agent-default', 'app-producer', 'connector-producer', 'reviewer', 'none'] as const;
 export type GrantProfile = (typeof GRANT_PROFILES)[number];
 
 export function profileFor(
@@ -235,6 +276,13 @@ export function profileFor(
             create_as: 'accepted',
             acceptance_method: 'policy',
           },
+        ],
+      };
+    case 'connector-producer':
+      return {
+        grant: { client_id: clientId, capabilities: ['memory.read_accepted', 'state.read', 'state.write', 'connector.sync'] },
+        create_rules: [
+          { rule_id: `profile-connector-${clientId}`, client_id: clientId, item_type: '*', create_as: 'accepted', acceptance_method: 'policy' },
         ],
       };
     case 'reviewer':

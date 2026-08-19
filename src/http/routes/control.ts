@@ -17,7 +17,7 @@ const agentCreateSchema = z.object({
   namespace: z.string().min(1).max(64),
   principal_kind: z.enum(['agent', 'service']),
   scopes: z.array(z.enum(SCOPES)).max(SCOPES.length),
-  profile: z.enum(['agent-default', 'app-producer', 'reviewer', 'none']).default('none'),
+  profile: z.enum(['agent-default', 'app-producer', 'reviewer', 'connector-producer', 'none']).default('none'),
   max_sensitivity: z.enum(SENSITIVITIES).default('normal'),
   read_sources: z.array(z.string().min(1).max(100)).max(100).nullable().default(null),
   auth_method: z.enum(['enrollment_key', 'legacy_key']).default('enrollment_key'),
@@ -32,6 +32,10 @@ const reviewSchema = z.object({
   expected_revision: z.number().int().positive(),
   note: z.string().max(2000).optional(),
   idempotency_key: z.string().min(1).max(200),
+});
+const reviewBatchControlSchema = z.object({
+  namespace: z.string().min(1), confirm_namespace: z.string().min(1), confirm_item_ids: z.array(z.string().min(1)).min(1).max(20), confirm_counts: z.object({ normal: z.number().int().nonnegative(), private: z.number().int().nonnegative() }), confirm_private: z.boolean().default(false),
+  items: z.array(reviewSchema.extend({ id: z.string().min(1) })).min(1).max(20),
 });
 
 function noStore(reply: FastifyReply): FastifyReply {
@@ -290,7 +294,11 @@ export function registerControlRoutes(app: FastifyInstance, deps: AppDeps): void
     if (!controlRead(req, reply, deps, (req.query as any).namespace ?? '*')) return;
     const client = linkedClient(deps, req, (req.query as any).namespace);
     if (!client) return noStore(reply).code(403).send({ error: { code: 'namespace_unavailable', message: 'No linked human reviewer client has access to this namespace' } });
-    try { return noStore(reply).send({ namespace: client.namespace, items: deps.commands.listCandidates(client, 'inbox', 100) }); } catch (err) { return sendError(reply, err); }
+    try {
+      const items = deps.commands.listCandidates(client, 'inbox', 100);
+      const groups = { duplicate: items.filter((item: any) => item.data && typeof item.data === 'object' && (item.data as any).duplicate_of), conflict: items.filter((item: any) => item.successor_of || item.superseded_by), stale: items.filter((item: any) => item.valid_until && item.valid_until <= new Date().toISOString()), general: items.filter((item: any) => !(item.data && typeof item.data === 'object' && (item.data as any).duplicate_of) && !item.successor_of && !item.superseded_by && !(item.valid_until && item.valid_until <= new Date().toISOString())) };
+      return noStore(reply).send({ namespace: client.namespace, items, groups });
+    } catch (err) { return sendError(reply, err); }
   });
 
   app.post('/v1/control/review/items/:id', async (req, reply) => {
@@ -305,6 +313,19 @@ export function registerControlRoutes(app: FastifyInstance, deps: AppDeps): void
       if (existing.trust_state === 'candidate' && parsed.data.decision === 'revoke') return noStore(reply).code(400).send({ error: { code: 'invalid_review_transition', message: 'candidates can only be accepted or rejected' } });
       if (existing.trust_state === 'accepted' && parsed.data.decision !== 'revoke') return noStore(reply).code(400).send({ error: { code: 'invalid_review_transition', message: 'accepted items can only be revoked or corrected with a successor' } });
       return noStore(reply).send(deps.commands.reviewMemory(client, (req.params as { id: string }).id, { decision: parsed.data.decision, expectedRevision: parsed.data.expected_revision, note: parsed.data.note }, parsed.data.idempotency_key));
+    } catch (err) { return sendError(reply, err); }
+  });
+
+  app.post('/v1/control/review/batch', async (req, reply) => {
+    if (!requireMutation(req, reply, deps)) return;
+    const parsed = reviewBatchControlSchema.safeParse(req.body);
+    if (!parsed.success) return noStore(reply).code(400).send({ error: { code: 'invalid_request', message: parsed.error.message } });
+    if (parsed.data.namespace !== parsed.data.confirm_namespace) return noStore(reply).code(400).send({ error: { code: 'confirmation_required', message: 'confirm_namespace must match namespace' } });
+    const client = linkedClient(deps, req, parsed.data.namespace);
+    if (!client) return noStore(reply).code(403).send({ error: { code: 'namespace_unavailable', message: 'No linked human reviewer client has access to this namespace' } });
+    try {
+      const result = deps.commands.reviewBatch(client, { namespace: parsed.data.namespace, confirmItemIds: parsed.data.confirm_item_ids, confirmPrivate: parsed.data.confirm_private, expectedCounts: parsed.data.confirm_counts, items: parsed.data.items.map((item) => ({ id: item.id, decision: item.decision, expectedRevision: item.expected_revision, note: item.note, idempotencyKey: item.idempotency_key })) });
+      return noStore(reply).send({ namespace: parsed.data.namespace, normal_count: result.normalCount, private_count: result.privateCount, results: result.results });
     } catch (err) { return sendError(reply, err); }
   });
 
@@ -446,10 +467,35 @@ export function registerControlRoutes(app: FastifyInstance, deps: AppDeps): void
     return policy ? noStore(reply).send({ namespace, version: policy.version, rules: policy.policy, history: deps.policiesRepo.history(namespace) }) : noStore(reply).code(404).send({ error: { code: 'not_found', message: 'policy not found' } });
   });
 
+  app.post('/v1/control/policies/:namespace/validate', async (req, reply) => {
+    if (!requireControlSession(req, reply)) return; const namespace = (req.params as { namespace: string }).namespace; const client = linkedClient(deps, req, namespace); if (!client && !req.controlSession!.principal.controlAdmin) return noStore(reply).code(403).send({ error: { code: 'namespace_unavailable', message: 'namespace is not linked' } });
+    try { return noStore(reply).send(deps.commands.validatePolicyDraft(client ?? (await import('../auth.js')).ADMIN_CLIENT, namespace, (req.body as any)?.rules)); } catch (err) { return sendError(reply, err); }
+  });
+  app.post('/v1/control/policies/:namespace/simulate', async (req, reply) => {
+    if (!requireControlSession(req, reply)) return; const namespace = (req.params as { namespace: string }).namespace; const client = linkedClient(deps, req, namespace); if (!client && !req.controlSession!.principal.controlAdmin) return noStore(reply).code(403).send({ error: { code: 'namespace_unavailable', message: 'namespace is not linked' } });
+    try { return noStore(reply).send(deps.commands.simulatePolicyDraft(client ?? (await import('../auth.js')).ADMIN_CLIENT, namespace, (req.body as any)?.rules, ((req.body as any)?.cases ?? []) as never)); } catch (err) { return sendError(reply, err); }
+  });
+  app.post('/v1/control/policies/:namespace/apply', async (req, reply) => {
+    if (!requireMutation(req, reply, deps, true) || !requireAdmin(req, reply)) return; const namespace = (req.params as { namespace: string }).namespace; const client = linkedClient(deps, req, namespace); if (!client) return noStore(reply).code(403).send({ error: { code: 'namespace_unavailable', message: 'a linked human client with policy.manage is required' } });
+    const body = z.object({ rules: z.unknown(), base_version: z.number().int().nonnegative().optional(), idempotency_key: z.string().min(1) }).safeParse(req.body); if (!body.success) return noStore(reply).code(400).send({ error: { code: 'invalid_request', message: body.error.message } });
+    try { return noStore(reply).send(deps.commands.applyPolicy(client ?? (await import('../auth.js')).ADMIN_CLIENT, namespace, body.data.rules, { expectedVersion: body.data.base_version, idempotencyKey: body.data.idempotency_key })); } catch (err) { return sendError(reply, err); }
+  });
+  app.post('/v1/control/policies/:namespace/rollback', async (req, reply) => {
+    if (!requireMutation(req, reply, deps, true) || !requireAdmin(req, reply)) return; const namespace = (req.params as { namespace: string }).namespace; const client = linkedClient(deps, req, namespace); if (!client) return noStore(reply).code(403).send({ error: { code: 'namespace_unavailable', message: 'a linked human client with policy.manage is required' } });
+    const body = z.object({ version: z.number().int().positive(), base_version: z.number().int().nonnegative().optional(), idempotency_key: z.string().min(1) }).safeParse(req.body); if (!body.success) return noStore(reply).code(400).send({ error: { code: 'invalid_request', message: body.error.message } });
+    const historical = deps.policiesRepo.getVersion(namespace, body.data.version); if (!historical) return noStore(reply).code(404).send({ error: { code: 'not_found', message: 'no such policy version' } });
+    try { return noStore(reply).send(deps.commands.applyPolicy(client ?? (await import('../auth.js')).ADMIN_CLIENT, namespace, historical.rules, { expectedVersion: body.data.base_version, idempotencyKey: body.data.idempotency_key })); } catch (err) { return sendError(reply, err); }
+  });
+
   app.get('/v1/control/audit', async (req, reply) => {
     if (!requireAdmin(req, reply)) return;
     if (!controlRead(req, reply, deps, typeof (req.query as any).namespace === 'string' ? (req.query as any).namespace : '*')) return;
-    return noStore(reply).send({ entries: deps.auditRepo.query({ namespace: typeof (req.query as any).namespace === 'string' ? (req.query as any).namespace : undefined, limit: 200 }) });
+    const q = req.query as any;
+    return noStore(reply).send({ entries: deps.auditRepo.query({ namespace: typeof q.namespace === 'string' ? q.namespace : undefined, clientId: typeof q.client_id === 'string' ? q.client_id : undefined, action: typeof q.action === 'string' ? q.action : undefined, outcome: q.outcome === 'allow' || q.outcome === 'deny' ? q.outcome : undefined, itemId: typeof q.item_id === 'string' ? q.item_id : undefined, itemType: typeof q.item_type === 'string' ? q.item_type : undefined, itemSensitivity: q.item_sensitivity === 'normal' || q.item_sensitivity === 'private' ? q.item_sensitivity : undefined, since: typeof q.since === 'string' ? q.since : undefined, until: typeof q.until === 'string' ? q.until : undefined, limit: Math.min(Number(q.limit ?? 200), 10_000) }) });
+  });
+  app.get('/v1/control/effectiveness', async (req, reply) => {
+    if (!requireControlSession(req, reply)) return; const namespace = typeof (req.query as any).namespace === 'string' ? (req.query as any).namespace : undefined; const client = linkedClient(deps, req, namespace); if (!client) return noStore(reply).code(403).send({ error: { code: 'namespace_unavailable', message: 'No linked human client has access to this namespace' } });
+    try { return noStore(reply).send(deps.commands.effectiveness(client, { namespace: client.namespace, since: typeof (req.query as any).since === 'string' ? (req.query as any).since : undefined, until: typeof (req.query as any).until === 'string' ? (req.query as any).until : undefined })); } catch (err) { return sendError(reply, err); }
   });
 
   app.get('/v1/control/settings', async (req, reply) => {

@@ -9,3 +9,6 @@ data/
 .DS_Store
 # Owner-only relevance gold set; never commit private query text or IDs.
 scripts/retrieval-eval.private.json
+# Owner-only aliases and multilingual/private retrieval fixtures.
+scripts/*alias*.json
+scripts/*private*.json

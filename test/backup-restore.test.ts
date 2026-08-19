@@ -88,7 +88,7 @@ describe('backup / restore / reindex on a real file database', () => {
     // reopen: no pending migrations → no error, no extra backup
     const db2 = openDatabase(dbFile);
     const migrations = db2.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get() as { n: number };
-    expect(migrations.n).toBe(9);
+    expect(migrations.n).toBe(14);
     db2.close();
     const backups = fs.existsSync(path.join(dir, 'backups')) ? fs.readdirSync(path.join(dir, 'backups')) : [];
     expect(backups.filter((f) => f.startsWith('pre-migration'))).toHaveLength(0); // fresh DB → no upgrade backup

@@ -51,65 +51,71 @@
 
 ### P1 — 完成 Owner 治理與資料品質
 
-7. **CHB-007｜安全批次審核與整理佇列｜M｜proposed**
+7. **CHB-007｜安全批次審核與整理佇列｜M｜done**
    - 最多 20 筆；每筆保留 expected revision 與 idempotency key，回傳逐筆結果，不因一筆 stale 重做已成功項目。
    - 接受前顯示 namespace、sensitivity 與明確確認；依 duplicate/conflict/stale 分組；禁止自動接受。
 
-8. **CHB-008｜Policy Editor、diff 與授權模擬器｜L｜proposed**
+8. **CHB-008｜Policy Editor、diff 與授權模擬器｜L｜done**
    - schema-driven 編輯 grants、create rules、state rules，顯示版本 diff、引用 client 與 allow/deny dry run。
    - Apply 需 control admin、linked `policy.manage` human client、fresh session；任何回復都建立新 append-only policy version。
 
-9. **CHB-009｜Audit Explorer 與營運報告｜M｜proposed**
+9. **CHB-009｜Audit Explorer 與營運報告｜M｜done**
    - 提供 namespace、client、action、allow/deny、時間與 item metadata 篩選、分頁與受控匯出。
    - 顯示 denied spikes、inactive credentials、異常讀取量；不顯示 query、snippet 或 item content，並沿用 `audit.read` 邊界。
 
-10. **CHB-010｜Context effectiveness analytics｜M｜proposed**
+10. **CHB-010｜Context effectiveness analytics｜M｜done**
     - 將 outcome ledger 聚合為 helpful/harmful、action-changed、source/agent/item 使用率與低價值候選。
     - 不儲存 prompt、action、tool output 或 compiled package；analytics 只能提供整理建議，不能直接改 accepted Memory。
 
-11. **CHB-011｜Owner-only retrieval eval 與簡繁查詢正規化｜M｜proposed**
+11. **CHB-011｜Owner-only retrieval eval 與簡繁查詢正規化｜M｜done**
     - 建立 Git-excluded private eval，涵蓋同義詞、人物、專案、successor、過期資料與 cross-namespace negative cases。
     - query-time 加簡繁轉換／別名 expansion，不複製 authoritative content；在 NAS 建立 100k items p95 gate，保留目前 2k regression baseline。
 
-12. **CHB-012｜完整記憶遷移 Campaign Tracker｜L｜proposed**
+12. **CHB-012｜完整記憶遷移 Campaign Tracker｜L｜done**
     - 管理 source/domain coverage、accessible/inaccessible/unknown/pending/submitted/reviewed 狀態、每批最多 20 筆與 dedup/exclusion ledger。
     - 仍有 inaccessible、pending 或 submitted-for-review 時必須維持 `overall_migration_status=partial`；`complete` 需通過來源計數、review、新 session query、舊 store 保留期與可還原備份驗證。
 
-13. **CHB-013｜Namespace 可攜式 Export/Import｜L｜proposed**
+13. **CHB-013｜Namespace 可攜式 Export/Import｜L｜done**
     - 提供帶 schema、checksum、provenance、版本資訊的 archive；它是匯出快照，不是第二個 system of record。
     - Import 預設建立 candidates；trusted import 僅限 NAS break-glass CLI，支援 dry run、collision report、mapping、rollback，不包含 credential/session/secret。
 
-14. **CHB-014｜Connector SDK 與同步治理契約｜L｜proposed**
+14. **CHB-014｜Connector SDK 與同步治理契約｜L｜done**
     - Connector 以獨立 worker/process 運行，使用 namespace-scoped service credential；OAuth/token 留在 worker secret store，不進 ContextHub DB。
     - 定義 minimized projection、`source_uri`、incremental cursor、delete/tombstone、retry/idempotency、rate-limit、freshness 與 sync-health；checkpoint 使用受 policy 控制的 operational state。
 
-15. **CHB-015｜Google Calendar Connector｜L｜proposed**
+15. **CHB-015｜Google Calendar Connector｜L｜done**
     - 先同步 owner allowlist calendars 與決策所需欄位；description、attendees、會議內容預設不落地。personal/work 使用不同 worker、credential、policy。
     - 驗收增量更新、取消、時區、recurring event、token revoke、來源刪除可重跑且不重複。
 
-16. **CHB-016｜GitHub Connector｜L｜proposed**
+16. **CHB-016｜GitHub Connector｜L｜done**
     - 只同步 allowlist repo 的 issue/PR/milestone/release/project summary 與 source URI；不保存 raw diff、secret、私密 comment 全文。
     - 驗收增量 checkpoint、rename/archive/delete、權限撤銷與 repository visibility 變更不會留下可讀舊資料。
 
 ### P2 — 擴大 Agent 與 Memory 能力
 
-17. **CHB-017｜Metadata-only 通知｜M｜proposed**：待審、備份逾期、restore 失敗、projection degraded、credential 異常與 connector stale 可送 webhook／Telegram adapter；通知只含事件類別、count、severity 與 Control Center link。
+17. **CHB-017｜Metadata-only 通知｜M｜done**：待審、備份逾期、restore 失敗、projection degraded、credential 異常與 connector stale 可送 webhook／Telegram adapter；通知只含事件類別、count、severity 與 Control Center link。
 
-18. **CHB-018｜MCP OAuth resource-server pilot｜L｜proposed**：只做 protected resource、issuer/JWKS/audience/resource/scope 驗證，授權伺服器採外部 OIDC/OAuth provider；完成 protected-resource metadata、`WWW-Authenticate` discovery、resource binding 與 Codex/Claude/Hermes compatibility matrix，通過前保留 enrollment/legacy fallback。[MCP authorization specification](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization)
+18. **CHB-018｜MCP OAuth resource-server pilot｜L｜done**：只做 protected resource、issuer/JWKS/audience/resource/scope 驗證，授權伺服器採外部 OIDC/OAuth provider；完成 protected-resource metadata、`WWW-Authenticate` discovery、resource binding 與 Codex/Claude/Hermes compatibility matrix，通過前保留 enrollment/legacy fallback。[MCP authorization specification](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization)
 
-19. **CHB-019｜授權後 Change Feed／Webhook｜L｜proposed**：commands 成功提交後產生 metadata-only cursor feed；內容仍需原 credential 讀取，支援 retry、backpressure、dead-letter metadata 與 per-namespace subscription。
+19. **CHB-019｜授權後 Change Feed／Webhook｜L｜done**：commands 成功提交後產生 metadata-only cursor feed；內容仍需原 credential 讀取，支援 retry、backpressure、dead-letter metadata 與 per-namespace subscription。
 
-20. **CHB-020｜Outcome-aware consolidation 與 re-verification｜L｜proposed**：以 similarity、successor、validity、freshness、outcome 找 merge/reverify/supersede/archive 候選；結果只能進 reviewer queue。
+20. **CHB-020｜Outcome-aware consolidation 與 re-verification｜L｜done**：以 similarity、successor、validity、freshness、outcome 找 merge/reverify/supersede/archive 候選；結果只能進 reviewer queue。
 
-21. **CHB-021｜本地 Neural Embedding｜L｜proposed / gated**：private eval 的 synonym/cross-language Recall@5 至少提升 5 個百分點、整體不退步超過 1 點、100k p95 ≤250 ms，才導入 on-device model；切換前 snapshot、切換後 reindex、可退回 feature hash。
+21. **CHB-021｜本地 Neural Embedding｜L｜deferred**：private eval 的 synonym/cross-language Recall@5 至少提升 5 個百分點、整體不退步超過 1 點、100k p95 ≤250 ms，才導入 on-device model；切換前 snapshot、切換後 reindex、可退回 feature hash。
 
-22. **CHB-022｜Canonical Entity Graph 與 bounded traversal｜XL｜proposed**：canonical node/alias/edge 為可重建 projection；traversal 有深度、節點數、時間上限，且每一步先套 namespace/trust/source/evidence ACL/sensitivity/validity。
+22. **CHB-022｜Canonical Entity Graph 與 bounded traversal｜XL｜done**：canonical node/alias/edge 為可重建 projection；traversal 有深度、節點數、時間上限，且每一步先套 namespace/trust/source/evidence ACL/sensitivity/validity。
 
-23. **CHB-023｜Insight-as-evidence closure｜L｜proposed**：支援 accepted insight 作 evidence，以 recursive closure 檢查可見性與 sensitivity；cycle、最大深度與上游撤銷需觸發重新審核。
+23. **CHB-023｜Insight-as-evidence closure｜L｜done**：支援 accepted insight 作 evidence，以 recursive closure 檢查可見性與 sensitivity；cycle、最大深度與上游撤銷需觸發重新審核。
 
-24. **CHB-024｜Ephemeral Runtime-input Adapter｜M｜proposed**：可把 caller 的 system constraints/tool results 納入同一次 budget，但只存在記憶體並標示為 untrusted runtime data；不儲存 input、rendered context 或 tool output。
+24. **CHB-024｜Ephemeral Runtime-input Adapter｜M｜done**：可把 caller 的 system constraints/tool results 納入同一次 budget，但只存在記憶體並標示為 untrusted runtime data；不儲存 input、rendered context 或 tool output。
 
-25. **CHB-025｜Tamper-evident Audit Chain｜L｜proposed**：audit row 加 hash chain，定期把 root hash 與 backup manifest 寫到 owner 控制的離地位置；只宣稱可偵測鏈斷裂，不宣稱能防止 NAS/DB admin 重建資料。
+25. **CHB-025｜Tamper-evident Audit Chain｜L｜done**：audit row 加 hash chain，定期把 root hash 與 backup manifest 寫到 owner 控制的離地位置；只宣稱可偵測鏈斷裂，不宣稱能防止 NAS/DB admin 重建資料。
+
+### P1/P2 implementation evidence (local, no provider deployment)
+
+- Schema migrations v10–v14 are additive and include migration-campaign, portability, connector/change-feed, OAuth binding, consolidation, graph and audit-chain projections. Rollback remains image-first; trusted import rollback requires the recorded snapshot.
+- Local validation on Node 22.19.0: 118/118 unit tests, 34/34 E2E checks, Playwright browser smoke pass, hygiene pass, `git diff --check`, and `npm audit --omit=dev` with 0 vulnerabilities.
+- External OAuth, Google Calendar, GitHub, Telegram and NAS smoke tests were intentionally not run. OAuth remains feature-flagged and fails closed when configuration is incomplete; CHB-021 stays deferred until the private/NAS 100k gate is evidenced.
 
 ### P3 — 只在量測 gate 通過後執行
 

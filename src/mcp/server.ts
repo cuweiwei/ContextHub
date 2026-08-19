@@ -377,6 +377,7 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
           .optional()
           .describe('Exact operational state keys; each still requires a matching state read rule'),
         include_private: z.boolean().default(false),
+        runtime_inputs: z.array(z.object({ kind: z.enum(['system_constraint', 'tool_result']), value: z.string().max(10_240) })).max(20).optional(),
       },
     },
     guarded((args: any) => {
@@ -398,9 +399,22 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
         },
         stateKeys: args.state_keys,
         entities: args.entities,
+        runtimeInputs: args.runtime_inputs,
       });
       return note ? { note, ...contextPackage } : contextPackage;
     }),
+  );
+
+  server.registerTool(
+    'get_changes',
+    { title: 'Read namespace change feed', description: 'Read metadata-only changes after a monotonic cursor.', inputSchema: { after: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(1000).default(100) } },
+    guarded((args: any) => { if (!canRead) throw new PolicyDeniedError('this API key lacks the "read" scope'); return commands.changes(client, args); }),
+  );
+
+  server.registerTool(
+    'traverse_entity_graph',
+    { title: 'Traverse entity graph', description: 'Traverse accepted entity definitions and relations with evidence ACLs applied at every step.', inputSchema: { entity: z.string().min(1).max(200), depth: z.number().int().min(1).max(3).default(2) } },
+    guarded((args: any) => { if (!canRead) throw new PolicyDeniedError('this API key lacks the "read" scope'); return commands.traverseGraph(client, args); }),
   );
 
   // ---------------- memory lifecycle ----------------

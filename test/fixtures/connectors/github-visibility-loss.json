@@ -1,0 +1,5 @@
+{
+  "repository": "owner/private-repo",
+  "status": 404,
+  "object": {"id": 42, "node_id": "MDU6SXNzdWU0Mg==", "title": "summary only", "body": "must not be copied", "comments": [{"body": "must not be copied"}]}
+}

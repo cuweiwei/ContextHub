@@ -1,5 +1,6 @@
 import type { DB } from '../db/connection.js';
 import { validatePolicy, type PolicyV1, stateValueSchemaSchema, type StateValueSchema } from './policy.js';
+import { RevisionConflictError } from './errors.js';
 
 export interface CurrentPolicy {
   namespace: string;
@@ -56,16 +57,23 @@ export function createPoliciesRepo(db: DB) {
     }
   }
 
-  /** Validates and installs a new policy version. Returns the new version number. */
-  function apply(namespace: string, raw: unknown, actor: string): CurrentPolicy {
-    const policy = validatePolicy(raw, {
+  function validate(namespace: string, raw: unknown): PolicyV1 {
+    return validatePolicy(raw, {
       namespaceClientIds: clientIdsIn(namespace),
       stateSchemaIds: stateSchemaIds(),
     });
+  }
+
+  /** Validates and installs a new policy version. Returns the new version number. */
+  function apply(namespace: string, raw: unknown, actor: string, expectedVersion?: number): CurrentPolicy {
+    const policy = validate(namespace, raw);
     const result = db.transaction((): CurrentPolicy => {
       const row = db
         .prepare('SELECT current_version FROM policies WHERE namespace = ?')
         .get(namespace) as { current_version: number } | undefined;
+      if (expectedVersion !== undefined && (row?.current_version ?? 0) !== expectedVersion) {
+        throw new RevisionConflictError(`policy base_version ${expectedVersion} is stale; current version is ${row?.current_version ?? 0}`);
+      }
       const version = (row?.current_version ?? 0) + 1;
       db.prepare(
         'INSERT INTO policy_versions (namespace, version, rules, created_at, created_by) VALUES (?, ?, ?, ?, ?)',
@@ -129,6 +137,7 @@ export function createPoliciesRepo(db: DB) {
 
   return {
     getCurrent,
+    validate,
     apply,
     history,
     getVersion,

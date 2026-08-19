@@ -47,8 +47,8 @@ describe('REST API', () => {
     expect(res.json().audit_writable).toBe(true);
     expect(res.json()).toMatchObject({
       service: 'contexthub',
-      version: '0.7.0',
-      schema_version: 9,
+      version: '0.9.0',
+      schema_version: 14,
       retrieval_model: 'local-feature-hash-v1',
       checks: { audit_writable: true, migrations_current: true, retrieval_projection_ready: true },
     });
@@ -419,6 +419,7 @@ describe('REST API', () => {
       url: '/v1/policies/work',
       headers: admin,
       payload: {
+        idempotency_key: randomUUID(),
         rules: {
           schema_version: 1,
           namespace_mode: 'work',
@@ -468,6 +469,7 @@ describe('REST API', () => {
       url: '/v1/policies/work',
       headers: admin,
       payload: {
+        idempotency_key: randomUUID(),
         rules: {
           schema_version: 1,
           namespace_mode: 'work',
@@ -813,7 +815,7 @@ describe('REST API', () => {
       },
     ];
     expect(
-      (await app.inject({ method: 'PUT', url: '/v1/policies/personal', headers: admin, payload: { rules } })).statusCode,
+      (await app.inject({ method: 'PUT', url: '/v1/policies/personal', headers: admin, payload: { rules, idempotency_key: randomUUID() } })).statusCode,
     ).toBe(200);
 
     const put = await app.inject({
