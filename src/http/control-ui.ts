@@ -25,13 +25,77 @@ const JS = String.raw`(() => {
   boot();
 })();`;
 
-const HTML = `<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ContextHub Control Center</title><link rel="stylesheet" href="/assets/control-center.css"></head><body><main class="shell"><header class="top"><div><div class="eyebrow">ContextHub · private control plane</div><h1>Control Center</h1><p class="lede">在 Tailscale 私網中管理記憶、Agent、審核與連線狀態。Control admin 不會自動取得任何 namespace 的 Memory 讀取權。</p></div><div class="identity">Loading identity…</div></header><nav aria-label="Control Center navigation"></nav><div id="status" class="status" role="status"></div><section id="content" aria-live="polite"></section></main><script src="/assets/control-center.js" defer></script></body></html>`;
+const NAMESPACE_JS = String.raw`(() => {
+  const select = document.querySelector('#namespace-selector');
+  if (!select) return;
+  const originalFetch = window.fetch.bind(window);
+  window.fetch = (input, init) => {
+    const raw = typeof input === 'string' ? input : input.url;
+    if (raw.startsWith('/v1/control/') && !raw.includes('namespace=') && !raw.endsWith('/me')) {
+      const url = new URL(raw, location.origin); const current = new URLSearchParams(location.search).get('namespace'); if (current) url.searchParams.set('namespace', current);
+      return originalFetch(url, init);
+    }
+    return originalFetch(input, init);
+  };
+  fetch('/v1/control/me', { credentials: 'same-origin', cache: 'no-store' }).then((response) => response.json()).then((me) => {
+    const namespaces = [...new Set((me.linked_clients || []).map((client) => client.namespace))];
+    const selected = new URLSearchParams(location.search).get('namespace') || namespaces[0] || '';
+    select.replaceChildren(...namespaces.map((namespace) => { const option = document.createElement('option'); option.value = namespace; option.textContent = namespace; option.selected = namespace === selected; return option; }));
+    select.addEventListener('change', () => { const url = new URL(location.href); url.searchParams.set('namespace', select.value); location.assign(url); });
+  }).catch(() => { select.replaceChildren(); });
+})();`;
+
+const ENROLLMENT_MODAL_JS = String.raw`(() => {
+  const modal = document.querySelector('#enrollment-secret-modal');
+  if (!modal) return;
+  const code = modal.querySelector('[data-enrollment-code]');
+  const countdown = modal.querySelector('[data-enrollment-countdown]');
+  const close = modal.querySelector('[data-enrollment-close]');
+  const copy = modal.querySelector('[data-enrollment-copy]');
+  let timer;
+  const clearSecret = () => { clearInterval(timer); timer = undefined; code.textContent = ''; countdown.textContent = ''; modal.close(); };
+  close.addEventListener('click', clearSecret);
+  modal.addEventListener('cancel', (event) => { event.preventDefault(); clearSecret(); });
+  copy.addEventListener('click', async () => { if (code.textContent) await navigator.clipboard.writeText(code.textContent); });
+  const originalFetch = window.fetch.bind(window);
+  window.fetch = async (input, init) => {
+    const response = await originalFetch(input, init);
+    const raw = typeof input === 'string' ? input : input.url;
+    if ((raw.endsWith('/v1/control/agents') || raw.includes('/enrollments')) && init?.method === 'POST' && response.ok) {
+      const body = await response.clone().json().catch(() => null);
+      const secret = body?.enrollment?.code || body?.code;
+      if (secret && !body?.replayed) {
+        code.textContent = secret;
+        const expires = Date.parse(body.enrollment?.expiresAt || body.expiresAt || '') || (Date.now() + 600000);
+        const tick = () => { countdown.textContent = Math.max(0, Math.ceil((expires - Date.now()) / 1000)) + ' 秒後到期'; };
+        tick(); timer = setInterval(tick, 1000); modal.showModal();
+      }
+    }
+    return response;
+  };
+})();`;
+
+const SESSION_MANAGEMENT_JS = String.raw`(() => {
+  if (!location.pathname.endsWith('/settings')) return;
+  const mount = () => document.querySelector('#content');
+  Promise.all([fetch('/v1/control/me', { credentials: 'same-origin', cache: 'no-store' }).then((r) => r.json()), fetch('/v1/control/sessions', { credentials: 'same-origin', cache: 'no-store' }).then((r) => r.json())]).then(([me, data]) => {
+    const root = mount(); if (!root) return;
+    const card = document.createElement('section'); card.className = 'card'; const title = document.createElement('h2'); title.textContent = 'Sessions'; card.append(title);
+    for (const session of data.sessions || []) { const row = document.createElement('div'); row.className = 'row-actions'; const label = document.createElement('span'); label.textContent = session.id + ' · idle ' + session.idle_expires_at + ' · absolute ' + session.absolute_expires_at; row.append(label); if (!session.revoked_at && session.id !== me.session.id) { const button = document.createElement('button'); button.type = 'button'; button.textContent = 'Revoke'; button.addEventListener('click', async () => { await fetch('/v1/control/sessions/' + encodeURIComponent(session.id) + '/revoke', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': me.csrf_token }, body: '{}' }); row.remove(); }); row.append(button); } card.append(row); }
+    root.append(card);
+  }).catch(() => {});
+})();`;
+
+const HTML = `<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ContextHub Control Center</title><link rel="stylesheet" href="/assets/control-center.css"></head><body><main class="shell"><header class="top"><div><div class="eyebrow">ContextHub · private control plane</div><h1>Control Center</h1><p class="lede">在 Tailscale 私網中管理記憶、Agent、審核與連線狀態。Control admin 不會自動取得任何 namespace 的 Memory 讀取權。</p></div><div class="identity">Loading identity…</div></header><label for="namespace-selector" class="muted">Namespace</label><select id="namespace-selector" aria-label="Namespace selector"></select><nav aria-label="Control Center navigation"></nav><div id="status" class="status" role="status"></div><section id="content" aria-live="polite"></section><dialog id="enrollment-secret-modal" aria-labelledby="enrollment-secret-title"><h2 id="enrollment-secret-title">Enrollment code（只顯示一次）</h2><code data-enrollment-code></code><p data-enrollment-countdown></p><button type="button" data-enrollment-copy>Copy</button><button type="button" data-enrollment-close>Close</button></dialog></main><script src="/assets/namespace-selector.js" defer></script><script src="/assets/enrollment-modal.js" defer></script><script src="/assets/session-management.js" defer></script><script src="/assets/control-center.js" defer></script></body></html>`;
 
 export function registerControlUiRoutes(app: FastifyInstance, deps: AppDeps): void {
   const enabled = () => deps.config.controlCenterEnabled;
   if (!enabled()) return;
   app.get('/assets/control-center.css', async (_req, reply) => reply.header('Content-Type','text/css; charset=utf-8').header('Cache-Control','public, max-age=300').send(CSS));
   app.get('/assets/control-center.js', async (_req, reply) => reply.header('Content-Type','text/javascript; charset=utf-8').header('Cache-Control','public, max-age=300').send(JS));
+  app.get('/assets/namespace-selector.js', async (_req, reply) => reply.header('Content-Type','text/javascript; charset=utf-8').header('Cache-Control','public, max-age=300').send(NAMESPACE_JS));
+  app.get('/assets/enrollment-modal.js', async (_req, reply) => reply.header('Content-Type','text/javascript; charset=utf-8').header('Cache-Control','public, max-age=300').send(ENROLLMENT_MODAL_JS));
+  app.get('/assets/session-management.js', async (_req, reply) => reply.header('Content-Type','text/javascript; charset=utf-8').header('Cache-Control','public, max-age=300').send(SESSION_MANAGEMENT_JS));
   app.get('/explore', async (_req, reply) => reply.redirect('/memories'));
   for (const path of ['/','/dashboard','/memories','/review','/agents','/namespaces','/policies','/audit','/settings']) {
     app.get(path, async (req, reply) => {
