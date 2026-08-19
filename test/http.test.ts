@@ -45,11 +45,14 @@ describe('REST API', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json().status).toBe('ok');
     expect(res.json().audit_writable).toBe(true);
-    expect(res.json().retrieval_projection).toMatchObject({
-      vector_extension_version: 'v0.1.9',
-      embedding_model: 'local-feature-hash-v1',
-      ready: true,
+    expect(res.json()).toMatchObject({
+      service: 'contexthub',
+      version: '0.7.0',
+      schema_version: 9,
+      retrieval_model: 'local-feature-hash-v1',
+      checks: { audit_writable: true, migrations_current: true, retrieval_projection_ready: true },
     });
+    expect(res.json().disk_free_bytes).toBeUndefined();
   });
 
   it('serves a no-store reviewer UI without embedding credentials', async () => {

@@ -1063,13 +1063,22 @@ export function createItemsRepo(
     }
 
     where.push(`${alias}.deleted = 0`);
-    if (!includeExpired) {
-      where.push(`(${alias}.expires_at IS NULL OR ${alias}.expires_at > ?)`);
-      params.push(now);
-      where.push(`(${alias}.valid_from IS NULL OR ${alias}.valid_from <= ?)`);
-      params.push(now);
-      where.push(`(${alias}.valid_until IS NULL OR ${alias}.valid_until > ?)`);
-      params.push(now);
+    const validity = filters?.validity ?? 'current';
+    if (!includeExpired && validity !== 'all') {
+      if (validity === 'scheduled') {
+        where.push(`(${alias}.valid_from > ?)`);
+        params.push(now);
+      } else if (validity === 'expired') {
+        where.push(`(${alias}.expires_at <= ? OR ${alias}.valid_until <= ?)`);
+        params.push(now, now);
+      } else {
+        where.push(`(${alias}.expires_at IS NULL OR ${alias}.expires_at > ?)`);
+        params.push(now);
+        where.push(`(${alias}.valid_from IS NULL OR ${alias}.valid_from <= ?)`);
+        params.push(now);
+        where.push(`(${alias}.valid_until IS NULL OR ${alias}.valid_until > ?)`);
+        params.push(now);
+      }
     }
     // Operational state slots have their own read surface (state rules).
     where.push(`(${alias}.state_kind IS NULL OR ${alias}.state_kind != 'operational')`);
@@ -1144,6 +1153,10 @@ export function createItemsRepo(
       where.push(`${alias}.status IN (${filters.statuses.map(() => '?').join(',')})`);
       params.push(...filters.statuses);
     }
+    if (filters?.trust_states?.length) {
+      where.push(`${alias}.trust_state IN (${filters.trust_states.map(() => '?').join(',')})`);
+      params.push(...filters.trust_states);
+    }
     for (const tag of filters?.tags ?? []) {
       where.push(`EXISTS (SELECT 1 FROM item_tag_index ti WHERE ti.item_id = ${alias}.id AND ti.tag = ?)`);
       params.push(normalizeTag(tag));
@@ -1162,11 +1175,13 @@ export function createItemsRepo(
     }
   }
 
-  function list(access: ReadAccess, opts: ListOptions): { items: ContextItem[]; nextCursor?: string } {
+  function list(access: ReadAccess, opts: ListOptions): { items: ContextItem[]; nextCursor?: string; totalMatched: number } {
     const now = new Date().toISOString();
     const where: string[] = [];
     const params: unknown[] = [];
     applyFilters(where, params, opts.filters, now, access, opts.surface);
+    const countWhere = [...where];
+    const countParams = [...params];
 
     const keyExpr = 'COALESCE(i.occurred_at, i.created_at)';
     let orderBy: string;
@@ -1194,6 +1209,8 @@ export function createItemsRepo(
       .prepare(`SELECT i.* FROM context_items i WHERE ${where.join(' AND ')} ORDER BY ${orderBy} LIMIT ?`)
       .all(...params, opts.limit + 1) as ItemRow[];
 
+    const count = db.prepare(`SELECT COUNT(*) AS n FROM context_items i WHERE ${countWhere.join(' AND ')}`).get(...countParams) as { n: number };
+
     const items = rows.slice(0, opts.limit).map(rowToItem);
     let nextCursor: string | undefined;
     if (rows.length > opts.limit && items.length > 0) {
@@ -1203,7 +1220,29 @@ export function createItemsRepo(
           ? encodeCursor({ k: last.occurred_at ?? last.created_at, id: last.id })
           : encodeCursor({ id: last.id });
     }
-    return { items, nextCursor };
+    return { items, nextCursor, totalMatched: count.n };
+  }
+
+  function facets(access: ReadAccess, filters: ListFilters | undefined, surface: TrustSurface) {
+    const now = new Date().toISOString();
+    const make = (column: string) => {
+      const where: string[] = [];
+      const params: unknown[] = [];
+      applyFilters(where, params, filters, now, access, surface);
+      const rows = db.prepare(`SELECT ${column} AS value, COUNT(*) AS count FROM context_items i WHERE ${where.join(' AND ')} GROUP BY ${column} ORDER BY count DESC, value`).all(...params) as Array<{ value: string | null; count: number }>;
+      return rows.filter((row) => row.value !== null).map((row) => ({ value: row.value as string, count: row.count }));
+    };
+    return {
+      source: make('i.source'), type: make('i.type'), trust: make('i.trust_state'), sensitivity: make('i.sensitivity'),
+      information_class: make('i.information_class'), memory_kind: make('i.memory_kind'), status: make('i.status'),
+    };
+  }
+
+  function summary(access: ReadAccess, filters: ListFilters | undefined, surface: TrustSurface) {
+    const where: string[] = [];
+    const params: unknown[] = [];
+    applyFilters(where, params, filters, new Date().toISOString(), access, surface);
+    return db.prepare(`SELECT i.trust_state, i.information_class, COUNT(*) AS count FROM context_items i WHERE ${where.join(' AND ')} GROUP BY i.trust_state, i.information_class ORDER BY i.trust_state, i.information_class`).all(...params) as Array<{ trust_state: string; information_class: string; count: number }>;
   }
 
   /**
@@ -1885,6 +1924,8 @@ export function createItemsRepo(
     purge,
     history,
     list,
+    facets,
+    summary,
     search,
     sourcesOverview,
     countCandidates,
