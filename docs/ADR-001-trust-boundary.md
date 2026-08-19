@@ -48,7 +48,7 @@
 ## 備份、DR 與一致性承諾
 
 - **RPO ≤ 24h**(每日 `backup` = `VACUUM INTO` 一致性快照);單機 crash 依 WAL + `synchronous=FULL` 保到最後一筆已 ack commit。
-- **RTO 分鐘級**:`scripts/restore.sh`(stop → 還原快照 → start → **必跑 reindex** → health)。
+- **RTO 分鐘級**:正式升級先以上一個 image rollback；只有 schema 不相容或 DB 損壞才依 verified manifest 還原。日常驗證使用 `cli restore-drill`（隔離副本，不碰 production DB）。
 - **每月 restore drill**:拿最新快照實際還原到隔離目錄,驗證 health + 查詢 + 版本歷史。
 - 離地備份:Hyper Backup 指向快照目錄並啟用其**內建 client-side 加密**(金鑰由 owner 持有);本地快照不另行 DIY 加密(NAS admin 在信任邊界內)。
 - 一致性承諾(驗收標準):單 active writer 之下,任一介面收到寫入成功後,其他具權限工具其後開始的讀取(REST 或 MCP)必得該版本或更新的已提交版本。不承諾 HA 或跨副本語意。

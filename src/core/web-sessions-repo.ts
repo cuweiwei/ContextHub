@@ -69,6 +69,13 @@ export function createWebSessionsRepo(db: DB) {
     return res.changes > 0;
   }
 
+  function revokeForPrincipal(id: string, principalId: string, revokedBy: string): boolean {
+    const res = db.prepare(
+      'UPDATE web_sessions SET revoked_at = ?, revoked_by = ? WHERE id = ? AND principal_id = ? AND revoked_at IS NULL',
+    ).run(new Date().toISOString(), revokedBy, id, principalId);
+    return res.changes > 0;
+  }
+
   function revokeAllForPrincipal(principalId: string, revokedBy: string): number {
     return (db.prepare('UPDATE web_sessions SET revoked_at = ?, revoked_by = ? WHERE principal_id = ? AND revoked_at IS NULL')
       .run(new Date().toISOString(), revokedBy, principalId)).changes;
@@ -91,7 +98,7 @@ export function createWebSessionsRepo(db: DB) {
     return raw;
   }
 
-  return { create, getValid, touch, revoke, revokeAllForPrincipal, list, csrfMatches, rotateCsrf };
+  return { create, getValid, touch, revoke, revokeForPrincipal, revokeAllForPrincipal, list, csrfMatches, rotateCsrf };
 }
 
 export type WebSessionsRepo = ReturnType<typeof createWebSessionsRepo>;

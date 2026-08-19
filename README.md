@@ -98,7 +98,7 @@ sudo /var/packages/Tailscale/target/bin/tailscale serve \
 sudo /var/packages/Tailscale/target/bin/tailscale serve \
   --bg --yes --https=8443 http://127.0.0.1:8788
 
-curl http://<nas-tailscale-ip>:8788/health   # {"status":"ok","audit_writable":true,...}
+curl http://<nas-tailscale-ip>:8788/health   # redacted readiness + version/schema/model metadata
 curl -k https://<nas-tailscale-name>:8443/health
 docker compose exec contexthub node dist/cli.js reindex
 docker compose exec contexthub node dist/cli.js retrieval-status
@@ -107,15 +107,18 @@ docker compose exec contexthub node dist/cli.js retrieval-status
 **備份**(每日 NAS 排程;WAL 下直接複製 `.db` 不是一致備份):
 
 ```bash
-docker compose exec contexthub node dist/cli.js backup        # VACUUM INTO → /data/backups/
+docker compose exec contexthub node dist/cli.js backup        # snapshot + checksum manifest → /data/backups/
+docker compose exec contexthub node dist/cli.js doctor --json
+docker compose exec contexthub node dist/cli.js restore-drill --snapshot /data/backups/<manifest>.json --json
 docker compose exec contexthub node dist/cli.js idempotency-gc # 90 天 TTL 清理(每週)
 ```
 
-Hyper Backup 指向 `backups/` 並開啟 client-side 加密。**還原**(也是每月 drill 的腳本):
+Hyper Backup 指向 `backups/` 並開啟 client-side 加密。**還原演練**只在隔離副本執行:
 
 ```bash
-./scripts/restore.sh data/backups/contexthub-<ts>.db
-# stop → 移開舊 db 與 -wal/-shm → 放快照 → start → 必跑 reindex → health 驗證
+docker compose exec contexthub node dist/cli.js restore-drill \
+  --snapshot /data/backups/contexthub-<ts>.manifest.json --json
+# 正式升級先執行 scripts/upgrade-gate.sh；rollback 優先回上一個 image
 ```
 
 外出存取走 Tailscale,不開公網 port。ISP 固定公網 IP 不是必要條件；ContextHub

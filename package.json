@@ -1,11 +1,11 @@
 {
   "name": "contexthub",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Self-hosted context control plane: source projections, governed memory, and ephemeral context compilation.",
   "type": "module",
   "private": true,
   "engines": {
-    "node": ">=20"
+    "node": ">=22.19.0 <23"
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",
@@ -18,7 +18,9 @@
     "typecheck": "tsc --noEmit",
     "benchmark:retrieval": "tsx scripts/retrieval-benchmark.ts",
     "e2e": "bash scripts/e2e.sh",
-    "cli": "tsx src/cli.ts"
+    "cli": "tsx src/cli.ts",
+    "test:browser": "node scripts/browser-smoke.mjs",
+    "hygiene": "bash scripts/check-repo-hygiene.sh"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
@@ -28,6 +30,7 @@
     "zod": "^3.25.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.10.0",
     "tsx": "^4.19.0",

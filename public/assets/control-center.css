@@ -1,0 +1,4 @@
+/* Shared no-CDN styles for the vanilla Control Center modules. */
+:root { color-scheme: dark; font-family: system-ui, sans-serif; }
+button, input, select, textarea { font: inherit; }
+:focus-visible { outline: 3px solid #70e0b4; outline-offset: 2px; }

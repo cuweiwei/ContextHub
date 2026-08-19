@@ -77,6 +77,7 @@ export function createClientsRepo(db: DB) {
     maxSensitivity?: Sensitivity;
     /** Source whitelist: null/undefined = all sources, [] = none. */
     readSources?: string[] | null;
+    authMethod?: ClientInfo['auth_method'];
   }): { client: ClientInfo; apiKey: string } {
     if (!CLIENT_ID_RE.test(input.id)) {
       throw new Error('client id must match ^[a-z0-9][a-z0-9_-]{1,63}$');
@@ -97,8 +98,8 @@ export function createClientsRepo(db: DB) {
     const created_at = new Date().toISOString();
     db.prepare(
       `INSERT INTO clients (id, name, kind, principal_kind, namespace, api_key_hash, scopes,
-         max_sensitivity, read_sources, credential_version, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+         max_sensitivity, read_sources, credential_version, created_at, auth_method)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
     ).run(
       input.id,
       input.name,
@@ -110,6 +111,7 @@ export function createClientsRepo(db: DB) {
       maxSensitivity,
       readSources === null ? null : JSON.stringify(readSources),
       created_at,
+      input.authMethod ?? 'legacy_key',
     );
     return { client: rowToInfo(selectById.get(input.id) as ClientRow), apiKey };
   }
@@ -177,10 +179,16 @@ export function createClientsRepo(db: DB) {
 
   /** Disable/enable takes effect on the next request (verifyKey checks it). */
   function setDisabled(id: string, disabled: boolean): boolean {
-    const res = db
-      .prepare('UPDATE clients SET disabled = ?, disabled_at = ? WHERE id = ?')
-      .run(disabled ? 1 : 0, disabled ? new Date().toISOString() : null, id);
-    return res.changes > 0;
+    return db.transaction(() => {
+      const now = new Date().toISOString();
+      const res = db
+        .prepare('UPDATE clients SET disabled = ?, disabled_at = ? WHERE id = ?')
+        .run(disabled ? 1 : 0, disabled ? now : null, id);
+      if (disabled) {
+        db.prepare('UPDATE agent_enrollments SET revoked_at = ? WHERE client_id = ? AND consumed_at IS NULL AND revoked_at IS NULL').run(now, id);
+      }
+      return res.changes > 0;
+    })();
   }
 
   // --- namespaces (first-class registry) ---

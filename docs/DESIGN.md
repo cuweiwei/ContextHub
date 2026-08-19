@@ -68,7 +68,7 @@ ContextHub 的 compiler 只處理持久資訊與明確要求的 operational stat
 |---|---|---|
 | `/v1/*` | Apps、審核 UI、admin | REST + Bearer API key |
 | `/mcp` | AI agents | MCP Streamable HTTP(stateless)+ Bearer API key |
-| `/health` | 監控 | 免認證;回報 audit 可寫性與磁碟剩餘空間 |
+| `/health` | 監控 | 免認證;只回報 redacted readiness 與 build/schema/model 狀態 |
 | `/dashboard`、`/memories`、`/review`、`/agents` | 人類 Control Center | Tailscale HTTPS identity → revocable web session；不接受 ADMIN_TOKEN |
 | `/mcp/:namespace` | canonical MCP resource | legacy key 相容路徑；namespace 必須與 server-side credential 相同 |
 
@@ -154,7 +154,7 @@ ContextHub 不保存全部 chat history。Memory formation 使用既有安全路
 
 每一路候選 SQL 都在排名前呼叫同一個 `applyFilters()`：namespace → deleted/expiry/validity → trust surface → source/evidence ACL → sensitivity → type/status/tag/time。未授權 row 不會先成為 application-level candidate 再被丟棄。候選以 weighted Reciprocal Rank Fusion 合併，再乘 lifecycle/decay/confidence；回傳每筆 `retrieval_sources` 以及 mode、model、各路 candidate counts、elapsed time，方便 eval 與除錯，但 audit 不保存 query text。
 
-`item_embeddings` 只保存 item id、model、dimensions、content hash、BLOB vector 與時間；`item_tag_index`／`item_entity_index` 同樣只保存可重建的 normalized facet keys；它們不保存第二份內容，也不承擔 namespace/trust 真相。create/update/delete 與 projection 同 transaction 更新；`reindex` 會先清空 FTS/vector/facet projections，再從 `context_items` 重建。`retrieval-status` 與 `/health.retrieval_projection` 回報 model/version/coverage。Migration v7/v9 不在 migration transaction 計算舊資料 embeddings；升級後服務仍可 lexical fallback，但部署驗收必跑 `reindex` 直到 `ready=true`。
+`item_embeddings` 只保存 item id、model、dimensions、content hash、BLOB vector 與時間；`item_tag_index`／`item_entity_index` 同樣只保存可重建的 normalized facet keys；它們不保存第二份內容，也不承擔 namespace/trust 真相。create/update/delete 與 projection 同 transaction 更新；`reindex` 會先清空 FTS/vector/facet projections，再從 `context_items` 重建。`retrieval-status` 回報 model/version/coverage；`/health` 只回報 redacted projection readiness。Migration v7/v9 不在 migration transaction 計算舊資料 embeddings；升級後服務仍可 lexical fallback，但部署驗收必跑 `reindex` 直到 `ready=true`。
 
 ## 7. Context Compiler
 
@@ -182,7 +182,7 @@ Compiler 回傳 `package_id`、sections、constraints、estimated tokens 與 `re
 - `audit_log` append-only(程式無 UPDATE/DELETE 路徑):每次讀取(先寫稽核列**才**執行查詢;寫不進→503)、每次 mutation(與操作同 transaction,稽核失敗=整筆回滾)、每次拒絕(reason code)、每個 admin/policy 操作。
 - details 只放摘要:route/tool、filter 種類、筆數、deny reason——**不放**原始 query 全文、item 內容、snippet。
 - 非 admin 的 `audit.read` 釘死在自己的 namespace——個人與工作稽核軌各自獨立。
-- `/health` 回報 `audit_writable`、磁碟剩餘空間與 retrieval projection coverage；disk-full 即 fail-closed(搭配 NAS 監控告警)。索引 coverage 不足不阻斷 lexical read，但部署驗收不得視為完成。
+- `/health` 回報 `audit_writable`、redacted disk/migration/projection readiness 與 build metadata；disk-full 即 fail-closed(搭配 NAS 監控告警)。詳細 bytes/counts 僅由 control-admin maintenance API 提供。
 - **Idempotency 是 SoR 正確性需求**:所有 mutation 必填 `Idempotency-Key`(MCP tool schema 必填,agent 每個邏輯操作產一個 UUID)。同 key 同 payload→回存好的原結果(不重執行);同 key 異 payload→409。記錄與 mutation 同 transaction,90 天 TTL(`idempotency-gc`)。
 
 ## 10. REST API(v6)
@@ -212,7 +212,7 @@ Compiler 回傳 `package_id`、sections、constraints、estimated tokens 與 `re
 | `GET /v1/audit` | 稽核查詢(admin 全部;audit.read 限own namespace) |
 | `GET/PUT /v1/policies/:ns`、`GET /v1/policies/:ns/versions/:v` | 政策讀取/升版(policy.manage 限own ns)/歷史版 |
 | `POST /v1/clients`(namespace+principal_kind 必填,選配 profile)、`POST /v1/clients/:id/rotate-key`、`PATCH /v1/clients/:id`、`GET/POST /v1/namespaces`、`GET/PUT /v1/state-schemas/:id` | 管理(admin) |
-| `GET /health` | 監控(audit_writable、disk_free_bytes、retrieval_projection) |
+| `GET /health` | 無敏感 readiness（service/version/build/schema/model 與 audit/migration/projection/disk 狀態） |
 
 ## 11. MCP tools(19 個)
 
@@ -250,8 +250,8 @@ docker compose exec contexthub node dist/cli.js reindex
 docker compose exec contexthub node dist/cli.js retrieval-status # ready 必須為 true
 ```
 
-- **備份**:每日 `cli backup`(VACUUM INTO 一致性快照;WAL 下直接複製活 .db 不一致)。Hyper Backup 指向 `backups/`,開啟其 client-side 加密(金鑰 owner 持有)。
-- **還原**:`scripts/restore.sh <snapshot>`——stop→移開舊 db 與 **-wal/-shm**→放快照→start→**必跑 `reindex`**（FTS 與 vectors 都視為可丟棄 projection）→`retrieval-status ready=true`→health+smoke query。
+- **備份**:每日 `cli backup` 產生 VACUUM INTO 一致性快照與 `BackupManifestV1` checksum；Hyper Backup 指向 `backups/`,開啟其 client-side 加密(金鑰 owner 持有)。
+- **還原演練**:`cli restore-drill --snapshot <manifest>` 將快照複製到 OS temp，隔離 migration/reindex/health/query/history/audit/idempotency 驗證；不開啟 production DB。正式升級先通過 `scripts/upgrade-gate.sh`，rollback 優先回上一 image。
 - **每月 restore drill**(ADR-001):拿最新快照實際還原到隔離目錄驗證。`npm run e2e` 內建整條 備份→還原→reindex→驗證 流程。
 - Retention:versions/audit 永久;idempotency 90 天(`idempotency-gc` 排程);快照依 NAS 輪替。
 - Tailscale 私網,不開公網 port。Compose 的 host publication 必須綁 NAS 的

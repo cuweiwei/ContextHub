@@ -1048,6 +1048,42 @@ export function createCommands(deps: CommandDeps) {
     );
   }
 
+  function facets(client: ClientAuth, filters: Parameters<ItemsRepo['facets']>[1] = {}) {
+    return readAudited(client, 'read.facets', client.isAdmin ? null : 'memory.read_accepted', { filters }, (ctx) => {
+      const { surface } = surfaceFor(ctx, false);
+      return itemsRepo.facets(ctx.access, filters, surface);
+    });
+  }
+
+  function summary(client: ClientAuth) {
+    return readAudited(client, 'read.summary', client.isAdmin ? null : 'memory.read_accepted', {}, (ctx) => {
+      const { surface } = surfaceFor(ctx, false);
+      return itemsRepo.summary(ctx.access, {}, surface);
+    });
+  }
+
+  function getWorkbench(client: ClientAuth, id: string) {
+    return readAudited(client, 'read.workbench', client.isAdmin ? null : 'memory.read_accepted', { item_id: id }, (ctx) => {
+      const item = itemsRepo.get(ctx.access, id, { allCandidates: ctx.client.isAdmin || has(ctx, 'memory.read_all_candidates') });
+      if (!item) return null;
+      const history = itemsRepo.history(ctx.access, id, { allCandidates: ctx.client.isAdmin || has(ctx, 'memory.read_all_candidates') });
+      const predecessor = item.successor_of ? itemsRepo.get(ctx.access, item.successor_of, { allCandidates: true }) : null;
+      const successor = item.superseded_by ? itemsRepo.get(ctx.access, item.superseded_by, { allCandidates: true }) : null;
+      const evidence = item.derived_from.map((evidenceId) => itemsRepo.get(ctx.access, evidenceId, { allCandidates: false })).filter(Boolean);
+      return {
+        item,
+        provenance: { source: item.source, authority: item.authority, namespace: item.namespace, source_uri: item.source_uri },
+        versions: history?.versions ?? [],
+        reviews: history?.reviews ?? [],
+        predecessor,
+        successor,
+        authorized_evidence: evidence,
+        matched_acceptance_rule: item.acceptance_rule_id,
+        curation_suggestions: itemsRepo.curationSuggestions(ctx.access, { limit: 20 }).filter((s) => s.item_id === id),
+      };
+    });
+  }
+
   function getItem(client: ClientAuth, id: string): ContextItem | null {
     return readAudited(client, 'read.get', client.isAdmin ? null : 'memory.read_accepted', { item_id: id }, (ctx) => {
       const item = itemsRepo.get(ctx.access, id, {
@@ -1080,6 +1116,11 @@ export function createCommands(deps: CommandDeps) {
     return readAudited(client, 'read.candidates', client.isAdmin ? null : cap, { scope, limit }, (ctx) =>
       itemsRepo.listCandidates(ctx.access, scope === 'inbox' ? 'inbox' : 'own_candidates', limit),
     );
+  }
+
+  function countCandidates(client: ClientAuth, scope: 'my' | 'inbox' = 'inbox') {
+    const cap: Capability = scope === 'inbox' ? 'memory.read_all_candidates' : 'memory.read_own_candidates';
+    return readAudited(client, 'read.candidate_count', client.isAdmin ? null : cap, { scope }, (ctx) => itemsRepo.countCandidates(ctx.access, scope === 'inbox' ? 'inbox' : 'own_candidates'));
   }
 
   function curationSuggestions(client: ClientAuth, limit = 100) {
@@ -1311,9 +1352,13 @@ export function createCommands(deps: CommandDeps) {
     purgeItem,
     search,
     listItems,
+    facets,
+    summary,
+    getWorkbench,
     getItem,
     getHistory,
     listCandidates,
+    countCandidates,
     curationSuggestions,
     brief,
     currentContext,

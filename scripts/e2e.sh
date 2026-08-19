@@ -31,10 +31,10 @@ step "2/9 seed demo data + mint namespace-bound keys"
 npm run cli -- seed-demo
 AGENT_OUT=$(npm run cli -- create-client --id hermes-e2e --name "E2E Agent" --namespace personal --principal-kind agent --profile agent-default --scopes read,write 2>&1)
 AGENT_KEY=$(echo "$AGENT_OUT" | grep -o 'chk_[A-Za-z0-9_-]*' | head -1)
-[[ -n "$AGENT_KEY" ]] || { echo "could not mint agent key: $AGENT_OUT"; exit 1; }
+[[ -n "$AGENT_KEY" ]] || { echo "could not mint agent key (CLI output redacted)"; exit 1; }
 WORK_OUT=$(npm run cli -- create-client --id work-e2e --name "E2E Work Agent" --namespace work --principal-kind agent --profile none --scopes read,write 2>&1)
 WORK_KEY=$(echo "$WORK_OUT" | grep -o 'chk_[A-Za-z0-9_-]*' | head -1)
-[[ -n "$WORK_KEY" ]] || { echo "could not mint work key: $WORK_OUT"; exit 1; }
+[[ -n "$WORK_KEY" ]] || { echo "could not mint work key (CLI output redacted)"; exit 1; }
 echo "keys minted: personal ${AGENT_KEY:0:12}..., work ${WORK_KEY:0:12}..."
 
 step "3/9 start server on :$PORT"
