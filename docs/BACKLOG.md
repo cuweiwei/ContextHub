@@ -95,7 +95,7 @@
 
 17. **CHB-017｜Metadata-only 通知｜M｜done**：待審、備份逾期、restore 失敗、projection degraded、credential 異常與 connector stale 可送 webhook／Telegram adapter；通知只含事件類別、count、severity 與 Control Center link。
 
-18. **CHB-018｜MCP OAuth resource-server pilot｜L｜done**：只做 protected resource、issuer/JWKS/audience/resource/scope 驗證，授權伺服器採外部 OIDC/OAuth provider；完成 protected-resource metadata、`WWW-Authenticate` discovery、resource binding 與 Codex/Claude/Hermes compatibility matrix，通過前保留 enrollment/legacy fallback。[MCP authorization specification](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization)
+18. **CHB-018｜MCP OAuth resource-server pilot｜L｜ready**：只做 protected resource、issuer/JWKS/audience/resource/scope 驗證，授權伺服器採外部 OIDC/OAuth provider；已完成 protected-resource metadata、`WWW-Authenticate` discovery 與 resource binding，待真實 Codex/Claude/Hermes smoke 後才改為 `done`；通過前保留 enrollment/legacy fallback。[MCP authorization specification](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization)
 
 19. **CHB-019｜授權後 Change Feed／Webhook｜L｜done**：commands 成功提交後產生 metadata-only cursor feed；內容仍需原 credential 讀取，支援 retry、backpressure、dead-letter metadata 與 per-namespace subscription。
 
@@ -115,7 +115,7 @@
 
 - Schema migrations v10–v14 are additive and include migration-campaign, portability, connector/change-feed, OAuth binding, consolidation, graph and audit-chain projections. Rollback remains image-first; trusted import rollback requires the recorded snapshot.
 - Local validation on Node 22.19.0: 118/118 unit tests, 34/34 E2E checks, Playwright browser smoke pass, hygiene pass, `git diff --check`, and `npm audit --omit=dev` with 0 vulnerabilities.
-- External OAuth, Google Calendar, GitHub, Telegram and NAS smoke tests were intentionally not run. OAuth remains feature-flagged and fails closed when configuration is incomplete; CHB-021 stays deferred until the private/NAS 100k gate is evidenced.
+- External OAuth, Google Calendar, GitHub, Telegram and NAS smoke tests were intentionally not run. OAuth remains feature-flagged and fails closed when configuration is incomplete; CHB-018 stays `ready` until real Codex/Claude/Hermes smoke evidence exists, and CHB-021 stays `deferred` until the private/NAS 100k gate is evidenced.
 
 ### P3 — 只在量測 gate 通過後執行
 
