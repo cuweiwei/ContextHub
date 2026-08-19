@@ -83,6 +83,12 @@ npm run cli -- policy-apply --namespace work --file /tmp/work-policy.json
 
 ## NAS 部署
 
+初次安裝可依下列 compose 步驟；既有 production 的正式升級不要手動組合 build/restart
+命令，請使用 [NAS Deployment Runbook](docs/NAS-DEPLOY-RUNBOOK.md) 與
+`scripts/nas-deploy.sh`。標準流程會從 clean Git archive build、先建立 verified manifest、
+通過 read-only upgrade gate，才 recreate container，並自動執行 health、reindex、restore
+drill、doctor 與 image rollback。
+
 ```bash
 git clone <this repo> && cd ContextHub
 cp .env.example .env

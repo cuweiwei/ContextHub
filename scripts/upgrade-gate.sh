@@ -22,6 +22,7 @@ SNAP_DIR=$(cd "$(dirname "$MANIFEST")" && pwd)
 SNAP_NAME=$(basename "$MANIFEST")
 docker run --rm \
   --read-only \
+  --network none \
   -e DATA_DIR=/gate-data \
   --tmpfs /gate-data:rw,noexec,nosuid,size=256m \
   --tmpfs /tmp:rw,noexec,nosuid,size=256m \

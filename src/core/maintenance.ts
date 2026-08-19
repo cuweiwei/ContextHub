@@ -92,6 +92,18 @@ function runtime() {
   };
 }
 
+function databaseSchemaVersion(db: DB): number {
+  const hasMigrations = db
+    .prepare("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'")
+    .get() as { present: number } | undefined;
+  if (hasMigrations) {
+    const row = db.prepare('SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations').get() as { version: number };
+    return row.version;
+  }
+  const row = db.prepare('PRAGMA user_version').get() as { user_version: number };
+  return row.user_version;
+}
+
 function quickCheck(file: string): 'ok' {
   const probe = new Database(file, { readonly: true, fileMustExist: true });
   try {
@@ -124,13 +136,15 @@ export function createBackup(
     ? verifyAuditChain(auditDb)
     : undefined;
   auditDb.close();
+  const backupRuntime = runtime();
+  backupRuntime.schema_version = databaseSchemaVersion(db);
   const manifest: BackupManifestV1 = {
     format: 'contexthub-backup-manifest/v1',
     backup_id: `bkp_${randomUUID()}`,
     kind: options.kind ?? 'manual',
     created_at: new Date().toISOString(),
     database: { file: path.basename(destination), bytes: fs.statSync(destination).size, sha256: sha256(destination) },
-    runtime: runtime(),
+    runtime: backupRuntime,
     target_schema_version: options.targetSchemaVersion ?? null,
     verification: { quick_check: quickCheck(destination) },
     audit_chain: auditChain,

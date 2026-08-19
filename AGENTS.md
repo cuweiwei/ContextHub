@@ -26,6 +26,15 @@
 - Dependency change: also run `npm audit --omit=dev`; do not deploy with unresolved high or critical production findings.
 - Migration change: verify the automatic pre-migration snapshot and the restore plus reindex path.
 
+## NAS deployment
+
+- Follow `docs/NAS-DEPLOY-RUNBOOK.md`; do not assemble an ad-hoc production command sequence.
+- Keep the source Git worktree and production app/data directory explicit and separate. On the current NAS they may be a parent directory and an untracked child directory, so always use `git -C <source-dir>`.
+- Run `scripts/nas-deploy.sh --preflight-only` before requesting sudo. Only pass `--yes` after the owner explicitly authorizes deployment.
+- Never ask the owner to paste a sudo password, API key or `.env` value into chat. The owner authenticates `sudo -v` in the same NAS SSH TTY that runs the deploy script.
+- A deployment is complete only after `DEPLOYMENT VERIFIED`, live health version/commit matching, reindex, restore drill and doctor all pass. Preserve the emitted rollback image and metadata-only deployment report.
+- Do not bypass a failed backup, manifest, upgrade gate, health or doctor check. The deploy script may roll back an image, but database restore always requires separate owner authorization.
+
 ## Done means
 
 - Tests appropriate to the change pass on Node 22.

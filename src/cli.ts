@@ -164,6 +164,21 @@ function main(): void {
   const [command, ...rest] = process.argv.slice(2);
   const flags = parseFlags(rest);
   const config = loadConfig();
+  if (command === 'backup') {
+    // Backups are maintenance reads and must never become an implicit schema
+    // upgrade. This also lets the NAS deploy workflow create a verified
+    // manifest with the candidate image before that image is allowed to start.
+    const db = openExistingDatabase(config.dbFile);
+    try {
+      const outDir = flags.out ?? path.join(config.dataDir, 'backups');
+      const manifest = createBackup(db, { outDir });
+      console.log(`snapshot written: ${manifest.database.file}`);
+      console.log(`manifest written: ${manifest.database.file.replace(/\.db$/, '.manifest.json')}`);
+    } finally {
+      db.close();
+    }
+    return;
+  }
   if (command === 'doctor') {
     const db = openExistingDatabase(config.dbFile);
     const report = runDoctor(db, config.dataDir);
@@ -454,13 +469,6 @@ function main(): void {
     }
     case 'retrieval-status': {
       console.log(JSON.stringify(itemsRepo.retrievalProjectionStatus(), null, 2));
-      break;
-    }
-    case 'backup': {
-      const outDir = flags.out ?? path.join(config.dataDir, 'backups');
-      const manifest = createBackup(db, { outDir });
-      console.log(`snapshot written: ${manifest.database.file}`);
-      console.log(`manifest written: ${manifest.database.file.replace(/\.db$/, '.manifest.json')}`);
       break;
     }
     case 'purge': {
