@@ -35,6 +35,15 @@ export function openDatabase(file: string, opts: OpenOptions = {}): DB {
   return db;
 }
 
+/** Opens an already-initialized database without applying migrations. Used by
+ * read-only maintenance checks so doctor cannot silently change schema. */
+export function openExistingDatabase(file: string, opts: { readonly?: boolean } = {}): DB {
+  const db = new Database(file, { fileMustExist: true, readonly: opts.readonly ?? false });
+  db.pragma('foreign_keys = ON');
+  db.pragma('busy_timeout = 5000');
+  return db;
+}
+
 /**
  * Enforces the single-active-instance promise: a second server process on the
  * same data directory must fail fast instead of silently double-writing the
