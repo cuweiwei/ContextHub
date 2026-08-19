@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import Sqlite from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createAuditRepo } from '../src/core/audit-repo.js';
 import { createClientsRepo } from '../src/core/clients-repo.js';
@@ -92,6 +94,35 @@ describe('backup / restore / reindex on a real file database', () => {
     db2.close();
     const backups = fs.existsSync(path.join(dir, 'backups')) ? fs.readdirSync(path.join(dir, 'backups')) : [];
     expect(backups.filter((f) => f.startsWith('pre-migration'))).toHaveLength(0); // fresh DB → no upgrade backup
+  });
+
+  it('CLI backup records the database schema without migrating the live file', () => {
+    const dbFile = path.join(dir, 'contexthub.db');
+    const legacy = new Sqlite(dbFile);
+    legacy.exec(`
+      CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL);
+      INSERT INTO schema_migrations (version, name, applied_at) VALUES (1, 'legacy', '2026-01-01T00:00:00.000Z');
+      CREATE TABLE legacy_marker (value TEXT NOT NULL);
+      INSERT INTO legacy_marker (value) VALUES ('unchanged');
+    `);
+    legacy.close();
+
+    const output = execFileSync(process.execPath, [path.join(process.cwd(), 'dist/cli.js'), 'backup'], {
+      encoding: 'utf8',
+      env: { ...process.env, DATA_DIR: dir },
+    });
+    expect(output).toContain('manifest written:');
+
+    const reopened = new Sqlite(dbFile, { readonly: true });
+    expect((reopened.prepare('SELECT MAX(version) AS version FROM schema_migrations').get() as { version: number }).version).toBe(1);
+    expect((reopened.prepare('SELECT value FROM legacy_marker').get() as { value: string }).value).toBe('unchanged');
+    reopened.close();
+
+    const manifestFile = fs.readdirSync(path.join(dir, 'backups')).find((name) => name.endsWith('.manifest.json'))!;
+    const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'backups', manifestFile), 'utf8')) as {
+      runtime: { schema_version: number };
+    };
+    expect(manifest.runtime.schema_version).toBe(1);
   });
 
   it('snapshots a v6 database before migration v7 and restores plus reindexes that snapshot', () => {
