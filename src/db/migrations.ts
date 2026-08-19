@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type Database from 'better-sqlite3';
 import { seedPersonalPolicy, seedWorkPolicy, validatePolicy } from '../core/policy.js';
+import { writePreMigrationSnapshot } from './backup.js';
 
 // Migrations are embedded as strings so the compiled dist/ needs no extra
 // asset copying. `post` hooks run inside the same transaction as the SQL and
@@ -570,6 +571,8 @@ const MIGRATIONS: {
   },
 ];
 
+export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
+
 export function migrate(db: Database.Database): void {
   db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY,
@@ -586,11 +589,8 @@ export function migrate(db: Database.Database): void {
   // the snapshot cannot be written we do NOT migrate — restore is the only
   // rollback path, so it must exist first.
   if (!db.memory && applied.size > 0) {
-    const dir = path.join(path.dirname(db.name), 'backups');
-    fs.mkdirSync(dir, { recursive: true });
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     const target = pending[pending.length - 1]!.version;
-    db.prepare('VACUUM INTO ?').run(path.join(dir, `pre-migration-v${target}-${stamp}.db`));
+    writePreMigrationSnapshot(db, path.join(path.dirname(db.name), 'backups'), target);
   }
 
   const insert = db.prepare('INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)');

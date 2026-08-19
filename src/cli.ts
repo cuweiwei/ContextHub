@@ -28,7 +28,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { loadConfig } from './config.js';
-import { openDatabase } from './db/connection.js';
+import { openDatabase, openExistingDatabase } from './db/connection.js';
 import { createAuditRepo } from './core/audit-repo.js';
 import { createClientsRepo, parseScopes } from './core/clients-repo.js';
 import { createCommands } from './core/commands.js';
@@ -38,6 +38,8 @@ import { GRANT_PROFILES, type GrantProfile } from './core/policy.js';
 import { newItemSchema } from './core/types.js';
 import { ADMIN_CLIENT } from './http/auth.js';
 import { createWebPrincipalsRepo } from './core/web-principals-repo.js';
+import { createBackup, restoreDrill, runDoctor, writeMaintenanceRecord } from './core/maintenance.js';
+import { buildInfo } from './build-info.js';
 
 function parseFlags(argv: string[]): Record<string, string> {
   const flags: Record<string, string> = {};
@@ -157,6 +159,31 @@ function main(): void {
   const [command, ...rest] = process.argv.slice(2);
   const flags = parseFlags(rest);
   const config = loadConfig();
+  if (command === 'doctor') {
+    const db = openExistingDatabase(config.dbFile);
+    const report = runDoctor(db, config.dataDir);
+    db.close();
+    if (flags.json === 'true') console.log(JSON.stringify(report, null, 2));
+    else {
+      console.log(`ContextHub doctor: ${report.status.toUpperCase()} (exit ${report.exit_code})`);
+      for (const [name, check] of Object.entries(report.checks)) console.log(`${check.status.padEnd(4)} ${name}: ${check.message} — ${check.remediation}`);
+    }
+    process.exitCode = report.exit_code;
+    return;
+  }
+  if (command === 'restore-drill') {
+    const manifest = flags.snapshot;
+    if (!manifest) {
+      console.error('usage: restore-drill --snapshot <manifest.json> [--json]');
+      process.exitCode = 2;
+      return;
+    }
+    const record = restoreDrill(path.resolve(manifest), config.dataDir);
+    if (flags.json === 'true') console.log(JSON.stringify(record, null, 2));
+    else console.log(`restore drill ${record.status}: ${record.checks.filter((c) => c.status === 'pass').length}/${record.checks.length} checks passed`);
+    process.exitCode = record.status === 'pass' ? 0 : 2;
+    return;
+  }
   const db = openDatabase(config.dbFile, { synchronous: config.sqliteSynchronous });
   const clientsRepo = createClientsRepo(db);
   const itemsRepo = createItemsRepo(db);
@@ -366,17 +393,10 @@ function main(): void {
       break;
     }
     case 'backup': {
-      // WAL means copying the live .db can miss committed data still in the
-      // -wal file. VACUUM INTO writes a consistent snapshot; point NAS backup
-      // jobs (Hyper Backup, with its client-side encryption ON) at the
-      // snapshot directory. After RESTORING a snapshot, ALWAYS run `reindex`
-      // (implicit rowids may be renumbered by VACUUM, invalidating FTS).
       const outDir = flags.out ?? path.join(config.dataDir, 'backups');
-      fs.mkdirSync(outDir, { recursive: true });
-      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const dest = path.join(outDir, `contexthub-${stamp}.db`);
-      db.prepare('VACUUM INTO ?').run(dest);
-      console.log(`snapshot written: ${dest}`);
+      const manifest = createBackup(db, { outDir });
+      console.log(`snapshot written: ${manifest.database.file}`);
+      console.log(`manifest written: ${manifest.database.file.replace(/\.db$/, '.manifest.json')}`);
       break;
     }
     case 'purge': {
@@ -390,6 +410,12 @@ function main(): void {
     }
     case 'idempotency-gc': {
       const removed = commands.idempotencyGc(Number(flags.days ?? 90));
+      writeMaintenanceRecord(config.dataDir, {
+        format: 'contexthub-maintenance/v1', kind: 'idempotency_gc', status: 'pass',
+        started_at: new Date().toISOString(), completed_at: new Date().toISOString(),
+        runtime: buildInfo,
+        checks: [{ name: 'gc', status: 'pass' }], details: { removed, days: Number(flags.days ?? 90) },
+      });
       console.log(`removed ${removed} idempotency records older than ${flags.days ?? 90} days`);
       break;
     }
@@ -405,7 +431,8 @@ function main(): void {
           scopes: ['read', 'write'],
           profile: 'app-producer',
         });
-        console.log(`created demo client ${dc.id} — API key: ${apiKey}`);
+        void apiKey;
+        console.log(`created demo client ${dc.id}`);
       }
       let created = 0;
       for (const entry of DEMO_ITEMS) {
@@ -418,7 +445,7 @@ function main(): void {
     }
     default:
       console.error(
-        'commands: create-client | list-clients | rotate-key | disable-client | create-namespace | policy-show | policy-apply | register-state-schema | review | candidates | audit | reindex | retrieval-status | backup | purge | idempotency-gc | seed-demo',
+        'commands: create-client | list-clients | rotate-key | disable-client | create-namespace | policy-show | policy-apply | register-state-schema | review | candidates | audit | reindex | retrieval-status | backup | restore-drill | doctor | purge | idempotency-gc | seed-demo',
       );
       process.exit(1);
   }
