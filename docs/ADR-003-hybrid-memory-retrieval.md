@@ -16,7 +16,7 @@ v5 已能以 FTS5、多查詢 RRF、lifecycle/authority/freshness 與 Context Co
 
 ```text
 query + optional entity hints
-  → applyFilters(namespace/trust/source ACL/sensitivity/validity/lifecycle)
+  → applyFilters(namespace/trust/source ACL/sensitivity/validity/lifecycle/facets)
   → lexical candidates (FTS5/BM25, bounded LIKE fallback)
   → local vector candidates (sqlite-vec cosine)
   → structured entity candidates
@@ -29,9 +29,9 @@ Operational state 不進上述索引；只在 caller 明確列出 `state_keys` �
 
 ### 2. SQLite domain rows仍是唯一權威
 
-`context_items`、versions、reviews 與 policies 才是 domain truth。`items_fts` 和 `item_embeddings` 都是可丟棄 projection；後者只含 item id、model、dimensions、content hash、BLOB vector 與更新時間，不複製 item content 或 trust metadata。
+`context_items`、versions、reviews 與 policies 才是 domain truth。`items_fts`、`item_embeddings`、`item_tag_index` 與 `item_entity_index` 都是可丟棄 projection；它們只保存索引鍵或 item id、model、dimensions、content hash、BLOB vector 與更新時間，不複製 item content 或 trust metadata。Migration v9 建立 normalized tag/entity projections。
 
-Projection 在 create/update/delete transaction 中同步更新。Migration v7 只建立空 projection，不把 embedding 計算塞進 schema migration；升級、restore 或 model 變更後執行 `reindex`，再以 `retrieval-status` 驗證 `ready=true`。索引缺失時 lexical 路徑仍可用，不得把 partial coverage 宣稱成完整部署。
+Projection 在 create/update/delete transaction 中同步更新。Migration v7/v9 不把 embedding 計算塞進 schema migration；升級、restore 或 model 變更後執行 `reindex`，再以 `retrieval-status` 驗證 `ready=true`。索引缺失時 lexical 路徑仍可用，不得把 partial coverage 宣稱成完整部署。
 
 ### 3. 本地 embedding 與誠實能力邊界
 
@@ -49,8 +49,10 @@ sqlite-vec 目前仍為 pre-v1；v6 不把 experimental ANN 當必要權威元�
 
 - `search_context` 每筆回傳 `retrieval_sources`，整次查詢回傳 mode/model/candidate counts/elapsed time。
 - Context Package 帶同一份 retrieval diagnostics；audit 仍只記 mode/count，不記 query text。
-- `npm run benchmark:retrieval -- --items=N` 輸出 lexical/hybrid Recall@5、MRR、p50/p95，並在 hybrid regression 時非零退出。
+- 明確 filter 支援 `information_class`、`memory_kind` 與 exact canonical entity；query-time entity inference 只作 boost。
+- `npm run benchmark:retrieval -- --items=N` 讀取 60-case sanitized eval，輸出 lexical/hybrid Success@1、Recall@5、MRR、p50/p95，並在 hybrid regression 時非零退出。
 - 測試必覆蓋 typo vector recall、entity candidate、namespace/source/sensitivity/trust/validity filter、projection rebuild、backup/restore/reindex。
+- reviewer 可讀取 duplicate/conflict/stale/expired `working_state` 的只讀整理建議；建議不能自動改寫 accepted item。
 
 ## 後果
 

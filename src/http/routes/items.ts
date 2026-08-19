@@ -8,6 +8,8 @@ import {
   isoDateTime,
   newItemSchema,
   patchItemSchema,
+  INFORMATION_CLASSES,
+  MEMORY_KINDS,
   STATUSES,
 } from '../../core/types.js';
 
@@ -31,6 +33,9 @@ const listQuerySchema = z.object({
   status: z.string().optional(),
   q: z.string().optional(),
   entity: z.string().optional(),
+  entity_exact: z.string().optional(),
+  information_class: z.string().optional(),
+  memory_kind: z.string().optional(),
   retrieval_mode: z.enum(['hybrid', 'lexical']).default('hybrid'),
   since: isoDateTime.optional(),
   until: isoDateTime.optional(),
@@ -159,10 +164,21 @@ export function registerItemRoutes(app: FastifyInstance, deps: AppDeps): void {
     const statuses = csv(qp.status)?.filter((s): s is (typeof STATUSES)[number] =>
       (STATUSES as readonly string[]).includes(s),
     );
+    const informationClasses = csv(qp.information_class)?.filter(
+      (value): value is (typeof INFORMATION_CLASSES)[number] =>
+        (INFORMATION_CLASSES as readonly string[]).includes(value),
+    );
+    const memoryKinds = csv(qp.memory_kind)?.filter(
+      (value): value is (typeof MEMORY_KINDS)[number] =>
+        (MEMORY_KINDS as readonly string[]).includes(value),
+    );
     const filters = {
       sources: csv(qp.source),
       types: csv(qp.type),
       tags: csv(qp.tags),
+      information_classes: informationClasses,
+      memory_kinds: memoryKinds,
+      entity_filters: csv(qp.entity_exact),
       statuses,
       since: qp.since,
       until: qp.until,
@@ -217,6 +233,20 @@ export function registerItemRoutes(app: FastifyInstance, deps: AppDeps): void {
     try {
       const items = commands.listCandidates(req.client!, qp.data.scope, qp.data.limit);
       return reply.send({ scope: qp.data.scope, items });
+    } catch (err) {
+      return sendError(reply, err);
+    }
+  });
+
+  app.get('/v1/curation-suggestions', { preHandler: requireScope('read') }, async (req, reply) => {
+    const parsed = z
+      .object({ limit: z.coerce.number().int().min(1).max(500).default(100) })
+      .safeParse(req.query);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: { code: 'invalid_request', message: parsed.error.message } });
+    }
+    try {
+      return reply.send({ suggestions: commands.curationSuggestions(req.client!, parsed.data.limit) });
     } catch (err) {
       return sendError(reply, err);
     }

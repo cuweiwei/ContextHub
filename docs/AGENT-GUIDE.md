@@ -85,8 +85,8 @@ Enrollment 是目前的相容方案。MCP OAuth 仍是 feature-flagged pilot，�
 1. 用 `search_context` 搜尋相同主題，並視需要開啟 `include_candidates`。
 2. 若沒有等價項目，呼叫 `save_memory`。
 3. 一個 item 只表達一個可獨立審核的事實、偏好、決策或任務。
-4. 使用簡短 title、完整但精煉的 content，以及可搜尋的 tags／entities。
-5. 選擇 `memory_kind`：fact／preference／decision／experience／procedure／relationship／working_state；來源 app 的一般 projection 應省略。
+4. 使用簡短 title、完整但精煉的 content，以及可搜尋的 tags／entities；tags 會正規化，entity 建議使用穩定的 `<kind>:<canonical-id>`（例如 `project:contexthub`）。
+5. `save_memory` 必須明確選擇 `memory_kind`：fact／preference／decision／experience／procedure／relationship／working_state；來源 app 的一般 projection 應省略。
 6. 時效資訊應填 `valid_from`／`valid_until`；只有明確重新核對時才填 `last_verified_at`。`decay_policy` 影響 ranking，不等於刪除。
 7. 使用 `my_candidates` 確認寫入結果與待審狀態。
 
@@ -99,7 +99,7 @@ Enrollment 是目前的相容方案。MCP OAuth 仍是 feature-flagged pilot，�
   "title": "網路變更前先做唯讀檢查",
   "content": "使用者偏好先區分公網 IP 與 NAS LAN IP，未經明確授權不得套用、重開機或拔線。",
   "tags": ["network", "nas", "change-safety"],
-  "entities": ["device:GNest"],
+  "entities": ["device:gnest"],
   "sensitivity": "normal",
   "source_item_id": "migration:codex:network-change-safety",
   "idempotency_key": "<fresh UUID>"

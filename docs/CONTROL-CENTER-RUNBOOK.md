@@ -56,4 +56,4 @@ CSRF 與 session revoke 測試後，才開 `AGENT_ENROLLMENT_ENABLED`。Enrollme
 
 ## Rollback
 
-先把 `CONTROL_CENTER_ENABLED=false`、`AGENT_ENROLLMENT_ENABLED=false`、`MCP_OAUTH_ENABLED=false`，重啟 container；legacy MCP/REST 保持可用。優先回復上一個 image，不還原 DB，以免丟失部署後的 Memory writes。只有 schema 不相容或 DB 損壞才用 migration v8 前的 pre-migration snapshot，且還原後必跑 `reindex`。
+先把 `CONTROL_CENTER_ENABLED=false`、`AGENT_ENROLLMENT_ENABLED=false`、`MCP_OAUTH_ENABLED=false`，重啟 container；legacy MCP/REST 保持可用。優先回復上一個 image，不還原 DB，以免丟失部署後的 Memory writes。只有 schema 不相容或 DB 損壞才用 migration v9 前的 pre-migration snapshot，且還原後必跑 `reindex`。

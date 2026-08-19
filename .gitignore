@@ -7,3 +7,5 @@ data/
 *.db-wal
 .env
 .DS_Store
+# Owner-only relevance gold set; never commit private query text or IDs.
+scripts/retrieval-eval.private.json

@@ -60,6 +60,7 @@ describe('REST API', () => {
     expect(res.headers['content-security-policy']).toContain("default-src 'none'");
     expect(res.body).toContain('ContextHub · Human review');
     expect(res.body).toContain('/v1/candidates?scope=inbox');
+    expect(res.body).toContain('分類品質提醒');
     expect(res.body).not.toContain('ADMIN_TOKEN=');
     expect(res.body).not.toMatch(/chk_[A-Za-z0-9_-]{20,}/);
   });
@@ -217,6 +218,40 @@ describe('REST API', () => {
       .prepare("SELECT details FROM audit_log WHERE action = 'read.compile_context' ORDER BY id DESC LIMIT 1")
       .get() as { details: string };
     expect(audit.details).not.toContain('規劃專案發布與回滾');
+  });
+
+  it('supports semantic facet filters and read-only curation suggestions over REST', async () => {
+    const key = await createClient('memory-app', 'service', ['read', 'write']);
+    const auth = { authorization: `Bearer ${key}` };
+    const created = await app.inject({
+      method: 'POST',
+      url: '/v1/items',
+      headers: auth,
+      payload: payloadWithKey({
+        type: 'preference',
+        title: 'REST canonical preference',
+        content: 'stable setting',
+        tags: [' Finance ', 'FINANCE'],
+        entities: ['Project:ContextHub'],
+        memory_kind: 'preference',
+      }),
+    });
+    expect(created.statusCode).toBe(201);
+    expect(created.json().item.tags).toEqual(['finance']);
+    expect(created.json().item.entities).toEqual(['project:contexthub']);
+
+    const filtered = await app.inject({
+      method: 'GET',
+      url: '/v1/items?information_class=memory&memory_kind=preference&entity_exact=PROJECT%3AContextHub',
+      headers: auth,
+    });
+    expect(filtered.statusCode).toBe(200);
+    expect(filtered.json().items.map((item: any) => item.id)).toContain(created.json().item.id);
+
+    const suggestions = await app.inject({ method: 'GET', url: '/v1/curation-suggestions?limit=10', headers: auth });
+    expect(suggestions.statusCode).toBe(200);
+    expect(Array.isArray(suggestions.json().suggestions)).toBe(true);
+    expect(env.db.prepare('SELECT revision FROM context_items WHERE id = ?').get(created.json().item.id)).toEqual({ revision: 1 });
   });
 
   it('rejects creates without an idempotency_key', async () => {

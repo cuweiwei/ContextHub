@@ -14,6 +14,9 @@ const compileBodySchema = z.object({
   types: z.array(z.string().min(1)).max(50).optional(),
   tags: z.array(z.string().min(1)).max(50).optional(),
   entities: z.array(z.string().min(1).max(200)).max(50).optional(),
+  entity_filters: z.array(z.string().min(1).max(200)).max(50).optional(),
+  information_classes: z.array(z.enum(['source', 'memory', 'task_state'])).max(3).optional(),
+  memory_kinds: z.array(z.enum(['fact', 'preference', 'decision', 'experience', 'procedure', 'relationship', 'working_state'])).max(7).optional(),
   include_private: z.boolean().default(false),
   state_keys: z.array(z.string().min(1).max(200)).max(20).optional(),
 });
@@ -41,7 +44,15 @@ export function registerContextRoutes(app: FastifyInstance, deps: AppDeps): void
         queries: body.queries,
         target: body.target_agent,
         tokenBudget: body.token_budget,
-        filters: { sources: body.sources, types: body.types, tags: body.tags, sensitivity },
+        filters: {
+          sources: body.sources,
+          types: body.types,
+          tags: body.tags,
+          entity_filters: body.entity_filters,
+          information_classes: body.information_classes,
+          memory_kinds: body.memory_kinds,
+          sensitivity,
+        },
         stateKeys: body.state_keys,
         entities: body.entities,
       });

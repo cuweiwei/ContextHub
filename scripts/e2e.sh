@@ -82,9 +82,9 @@ REPLAY=$(curl -s -H "$AUTH" -H "Content-Type: application/json" http://127.0.0.1
 check "idempotent replay" '"replayed":true' "$REPLAY"
 
 step "7/9 MCP lifecycle: save_memory / propose_insight"
-SAVE=$(curl -s "${MCP_HDRS[@]}" http://127.0.0.1:$PORT/mcp -d "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"save_memory\",\"arguments\":{\"type\":\"preference\",\"title\":\"E2E 偏好記憶\",\"idempotency_key\":\"$(uuid)\"}}}")
+SAVE=$(curl -s "${MCP_HDRS[@]}" http://127.0.0.1:$PORT/mcp -d "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"save_memory\",\"arguments\":{\"type\":\"preference\",\"memory_kind\":\"preference\",\"title\":\"E2E 偏好記憶\",\"idempotency_key\":\"$(uuid)\"}}}")
 check "save_memory candidate" '\"trust_state\":\"candidate\"' "$SAVE"
-STORE=$(curl -s "${MCP_HDRS[@]}" http://127.0.0.1:$PORT/mcp -d "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"propose_insight\",\"arguments\":{\"type\":\"insight\",\"title\":\"E2E 洞察測試\",\"content\":\"使用者偏好早上專注工作\",\"tags\":[\"e2e\"],\"confidence\":0.8,\"idempotency_key\":\"$(uuid)\"}}}")
+STORE=$(curl -s "${MCP_HDRS[@]}" http://127.0.0.1:$PORT/mcp -d "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"propose_insight\",\"arguments\":{\"type\":\"insight\",\"memory_kind\":\"experience\",\"title\":\"E2E 洞察測試\",\"content\":\"使用者偏好早上專注工作\",\"tags\":[\"e2e\"],\"confidence\":0.8,\"idempotency_key\":\"$(uuid)\"}}}")
 check "propose_insight writes" '\"created\":true' "$STORE"
 
 COMPILED=$(curl -s -H "$AUTH" -H "Content-Type: application/json" http://127.0.0.1:$PORT/v1/context/compile \

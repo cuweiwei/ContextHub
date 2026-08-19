@@ -47,7 +47,7 @@ Agent runtime 仍負責 system/user instructions 與即時 tool output 的最後
 nvm use
 npm ci
 npm test          # tsc typecheck + vitest(隔離/信任/政策/稽核/一致性/還原邊界)
-npm run benchmark:retrieval -- --items=2000 # recall@5/MRR + p50/p95，可調資料量
+npm run benchmark:retrieval -- --items=2000 # 60-case Recall@5/Success@1/MRR + p50/p95
 npm run dev       # http://localhost:8787
 npm run e2e       # 真實 HTTP 端對端:REST↔MCP 一致性 → 備份 → 還原 → reindex → 驗證
 ```
@@ -148,11 +148,13 @@ docker exec contexthub node dist/cli.js web-principal-link \
 
 管理頁網址是 `https://<nas-tailscale-name>:8443/dashboard`；請使用 Tailscale DNS 名稱，不要用 `https://<tailscale-ip>:8443` 取代，因為 HTTPS 憑證與 identity proxy 都以 tailnet hostname 為準。只有在 Tailscale HTTPS reverse proxy 已配置後才開啟 `CONTROL_CENTER_ENABLED=true`、`CONTROL_CENTER_TAILSCALE_AUTH_ENABLED=true`、`CONTROL_CENTER_TRUSTED_PROXY=true`，並填入 `CONTROL_CENTER_CANONICAL_ORIGIN=https://<tailnet-host>:8443`。Enrollment 預設關閉；開啟 `AGENT_ENROLLMENT_ENABLED=true` 後，Agents 頁面可產生 single-use code，agent 透過 `/v1/agent-enrollment/exchange` 取得一次性 raw key。MCP OAuth 目前只保留 configuration 接縫，未經實測不宣稱支援；`LEGACY_API_KEYS_ENABLED=true` 是相容 fallback。
 
-18 個工具。讀取面：`compile_context`（依 intent、有效期、authority/freshness、ACL 與 token budget 產生短暫 package）、`search_context`（預設 hybrid：FTS5 + 本地向量 + structured entity，weighted RRF；結果帶 retrieval diagnostics、information_class/memory_kind/authority/trust_state）、`get_current_context`、`get_recent_context`、`get_context_item`、`get_context_brief`、`list_context_sources`、`get_memory_history`（版本＋裁決史）、`my_candidates`（自己的待審）。
+19 個工具。讀取面：`compile_context`（依 intent、有效期、authority/freshness、ACL 與 token budget 產生短暫 package）、`search_context`（預設 hybrid：FTS5 + 本地向量 + structured entity，weighted RRF；結果帶 retrieval diagnostics、information_class/memory_kind/authority/trust_state）、`curation_suggestions`（只讀的 duplicate/conflict/stale/expired working_state 建議）、`get_current_context`、`get_recent_context`、`get_context_item`、`get_context_brief`、`list_context_sources`、`get_memory_history`（版本＋裁決史）、`my_candidates`（自己的待審）。
 
-v6 的 `local-feature-hash-v1` 是完全本地、同步、可重現的 384 維 similarity embedding，擅長 typo／字形近似與欄位加權；它不宣稱具備大型神經模型的同義詞理解。embedding provider 可替換成另一個同步 on-device model，而 ACL、domain rows 與 API 不需改變。`item_embeddings` 與 FTS 都只是 projection；SQLite `context_items` 仍是唯一權威。
+`search_context` 與 `compile_context` 支援 `information_classes`、`memory_kinds`、`entity_filters` 硬過濾；`entities` 仍是 query-time boost。REST `GET /v1/items` 對應 `information_class`、`memory_kind`、`entity_exact`。Tags 與 entities 會以 NFKC、空白、大小寫及重複值正規化；`context_items` 仍是唯一權威，`item_tag_index`／`item_entity_index` 是 migration v9 建立的可重建 projection。
 
-記憶與回饋生命週期：`save_memory`（可標記 fact／preference／decision／experience／procedure／relationship／working_state）、`propose_insight`（推論＋evidence）、`revise_my_candidate`、`propose_successor`（取代過時的 accepted Memory，裁決原子寫回）、`record_context_outcome`（只記 context 是否改變行動及粗粒度結果）、`operate_task`、`curate_note`、`update_operational_state`／`get_operational_state`（exact-key 狀態槽）。
+v6 的 `local-feature-hash-v1` 是完全本地、同步、可重現的 384 維 similarity embedding，擅長 typo／字形近似與欄位加權；它不宣稱具備大型神經模型的同義詞理解。embedding provider 可替換成另一個同步 on-device model，而 ACL、domain rows 與 API 不需改變。`item_embeddings`、FTS 與 normalized tag/entity facets 都只是 projection；SQLite `context_items` 仍是唯一權威。
+
+記憶與回饋生命週期：`save_memory`（必須明確標記 fact／preference／decision／experience／procedure／relationship／working_state）、`propose_insight`（推論＋evidence）、`revise_my_candidate`、`propose_successor`（取代過時的 accepted Memory，裁決原子寫回）、`record_context_outcome`（只記 context 是否改變行動及粗粒度結果）、`operate_task`、`curate_note`、`update_operational_state`／`get_operational_state`（exact-key 狀態槽）。
 
 `context_items.information_class` 由 server 決定為 `source / memory / task_state`；`memory_kind`、`valid_from / valid_until`、`last_verified_at`、`decay_policy` 描述 Memory 的語意與生命週期。`valid_until`／`expires_at` 已過或尚未到 `valid_from` 的項目，不進任何 list/search/compiler 讀取面。
 
@@ -196,8 +198,8 @@ src/
   http/    # Fastify:auth + /v1 routes(items/candidates/review/task-op/curate/state/
            #   history/audit/policies/clients/namespaces)+ /explore + /review
            #   + Control Center + health
-  mcp/     # MCP server(18 tools)+ Streamable HTTP 掛載(stateless,一 key 一 namespace)
-  db/      # SQLite+sqlite-vec 連線(synchronous=FULL、instance lock)+ migrations(v1–v8)
+  mcp/     # MCP server(19 tools)+ Streamable HTTP 掛載(stateless,一 key 一 namespace)
+  db/      # SQLite+sqlite-vec 連線(synchronous=FULL、instance lock)+ migrations(v1–v9)
   cli.ts   # create-client/.../reindex/retrieval-status/backup/purge/...
 scripts/   # retrieval-benchmark.ts、e2e.sh、restore.sh(NAS runbook)
 test/      # 100+ tests:隔離/信任/政策/稽核 fail-closed/idempotency/一致性/還原邊界

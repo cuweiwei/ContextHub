@@ -1,7 +1,13 @@
 import type { DB } from '../db/connection.js';
 import { ulid } from './ids.js';
 import { buildFtsQuery, makeSnippet, segmentCjk } from './cjk.js';
-import { canonicalizeSourcePayload } from './canonical.js';
+import {
+  canonicalEntities,
+  canonicalTags,
+  canonicalizeSourcePayload,
+  normalizeEntity,
+  normalizeTag,
+} from './canonical.js';
 import {
   DEFAULT_LOCAL_EMBEDDING,
   type LocalEmbeddingProvider,
@@ -145,6 +151,16 @@ export interface RetrievalProjectionStatus {
   indexed_items: number;
   missing_items: number;
   ready: boolean;
+}
+
+export interface CurationSuggestion {
+  kind: 'duplicate' | 'conflict' | 'stale' | 'expired_working_state';
+  item_id: string;
+  related_item_ids: string[];
+  title: string;
+  memory_kind: MemoryKind | null;
+  reason: string;
+  severity: 'info' | 'warning';
 }
 
 export interface SourceOverview {
@@ -382,6 +398,10 @@ export function createItemsRepo(
   `);
   const ftsInsert = db.prepare('INSERT INTO items_fts (rowid, title, content, tags) VALUES (?, ?, ?, ?)');
   const ftsDelete = db.prepare('DELETE FROM items_fts WHERE rowid = ?');
+  const facetDelete = db.prepare('DELETE FROM item_tag_index WHERE item_id = ?');
+  const entityDelete = db.prepare('DELETE FROM item_entity_index WHERE item_id = ?');
+  const facetInsert = db.prepare('INSERT OR IGNORE INTO item_tag_index (item_id, tag) VALUES (?, ?)');
+  const entityInsert = db.prepare('INSERT OR IGNORE INTO item_entity_index (item_id, entity) VALUES (?, ?)');
   const embeddingUpsert = db.prepare(`
     INSERT INTO item_embeddings (item_id, model, dimensions, content_hash, embedding, updated_at)
     VALUES (?, ?, ?, ?, ?, ?)
@@ -407,13 +427,19 @@ export function createItemsRepo(
     rowid: number | bigint,
     item: Pick<ContextItem, 'id' | 'title' | 'content' | 'tags' | 'entities' | 'state_kind'>,
   ): void {
+    facetDelete.run(item.id);
+    entityDelete.run(item.id);
     // Operational state slots never enter the general read surfaces, so they
     // are not indexed either.
     if (item.state_kind === 'operational') {
       embeddingDelete.run(item.id);
       return;
     }
-    ftsInsert.run(rowid, segmentCjk(item.title), segmentCjk(item.content), segmentCjk(item.tags.join(' ')));
+    const tags = canonicalTags(item.tags);
+    const entities = canonicalEntities(item.entities);
+    for (const tag of tags) facetInsert.run(item.id, tag);
+    for (const entity of entities) entityInsert.run(item.id, entity);
+    ftsInsert.run(rowid, segmentCjk(item.title), segmentCjk(item.content), segmentCjk(tags.join(' ')));
     const vector = embeddingProvider.embedItem(item);
     if (vector.length !== embeddingProvider.dimensions) {
       throw new Error(
@@ -485,6 +511,8 @@ export function createItemsRepo(
   /** Full replace of an existing row from a NewItem (projection upsert). */
   function replaceRow(existing: ItemRow, input: NewItem, sensitivity: Sensitivity, actor: string): ContextItem {
     validateValidityWindow(input.valid_from, input.valid_until);
+    input.tags = canonicalTags(input.tags);
+    input.entities = canonicalEntities(input.entities);
     const current = rowToItem(existing);
     const next: ContextItem = {
       ...current,
@@ -635,6 +663,8 @@ export function createItemsRepo(
       trust: TrustDecision,
       extras: { successorOf?: string } = {},
     ): { item: ContextItem; created: boolean } => {
+      input.tags = canonicalTags(input.tags);
+      input.entities = canonicalEntities(input.entities);
       validateValidityWindow(input.valid_from, input.valid_until);
       if (input.derived_from.length > 0 && input.type !== 'insight') {
         throw new ValidationError('derived_from is only allowed on insight items');
@@ -820,6 +850,8 @@ export function createItemsRepo(
         );
       }
       const current = rowToItem(row);
+      if (patch.tags !== undefined) patch.tags = canonicalTags(patch.tags);
+      if (patch.entities !== undefined) patch.entities = canonicalEntities(patch.entities);
       const next: ContextItem = {
         ...current,
         ...('type' in patch && patch.type !== undefined ? { type: patch.type } : {}),
@@ -957,6 +989,8 @@ export function createItemsRepo(
       const rid = (selectRowid.get(id) as { rowid: number }).rowid;
       ftsDelete.run(rid);
       embeddingDelete.run(id);
+      facetDelete.run(id);
+      entityDelete.run(id);
       const fresh = db.prepare('SELECT * FROM context_items WHERE id = ?').get(id) as ItemRow;
       writeVersion(rowToItem(fresh), 'delete', actor);
       return true;
@@ -975,6 +1009,8 @@ export function createItemsRepo(
       const rid = (selectRowid.get(id) as { rowid: number }).rowid;
       ftsDelete.run(rid);
       embeddingDelete.run(id);
+      facetDelete.run(id);
+      entityDelete.run(id);
       db.prepare('DELETE FROM insight_evidence WHERE insight_id = ? OR evidence_id = ?').run(id, id);
       db.prepare('DELETE FROM item_versions WHERE item_id = ?').run(id);
       db.prepare('DELETE FROM item_reviews WHERE item_id = ?').run(id);
@@ -1016,6 +1052,7 @@ export function createItemsRepo(
     access: ReadAccess,
     surface: TrustSurface,
     alias = 'i',
+    includeExpired = false,
   ): void {
     // Namespace boundary FIRST. A non-admin access without a namespace is a
     // programming error — refuse loudly rather than leak.
@@ -1026,12 +1063,14 @@ export function createItemsRepo(
     }
 
     where.push(`${alias}.deleted = 0`);
-    where.push(`(${alias}.expires_at IS NULL OR ${alias}.expires_at > ?)`);
-    params.push(now);
-    where.push(`(${alias}.valid_from IS NULL OR ${alias}.valid_from <= ?)`);
-    params.push(now);
-    where.push(`(${alias}.valid_until IS NULL OR ${alias}.valid_until > ?)`);
-    params.push(now);
+    if (!includeExpired) {
+      where.push(`(${alias}.expires_at IS NULL OR ${alias}.expires_at > ?)`);
+      params.push(now);
+      where.push(`(${alias}.valid_from IS NULL OR ${alias}.valid_from <= ?)`);
+      params.push(now);
+      where.push(`(${alias}.valid_until IS NULL OR ${alias}.valid_until > ?)`);
+      params.push(now);
+    }
     // Operational state slots have their own read surface (state rules).
     where.push(`(${alias}.state_kind IS NULL OR ${alias}.state_kind != 'operational')`);
 
@@ -1093,13 +1132,25 @@ export function createItemsRepo(
       where.push(`${alias}.type IN (${filters.types.map(() => '?').join(',')})`);
       params.push(...filters.types);
     }
+    if (filters?.information_classes?.length) {
+      where.push(`${alias}.information_class IN (${filters.information_classes.map(() => '?').join(',')})`);
+      params.push(...filters.information_classes);
+    }
+    if (filters?.memory_kinds?.length) {
+      where.push(`${alias}.memory_kind IN (${filters.memory_kinds.map(() => '?').join(',')})`);
+      params.push(...filters.memory_kinds);
+    }
     if (filters?.statuses?.length) {
       where.push(`${alias}.status IN (${filters.statuses.map(() => '?').join(',')})`);
       params.push(...filters.statuses);
     }
     for (const tag of filters?.tags ?? []) {
-      where.push(`EXISTS (SELECT 1 FROM json_each(${alias}.tags) WHERE json_each.value = ?)`);
-      params.push(tag);
+      where.push(`EXISTS (SELECT 1 FROM item_tag_index ti WHERE ti.item_id = ${alias}.id AND ti.tag = ?)`);
+      params.push(normalizeTag(tag));
+    }
+    for (const entity of filters?.entity_filters ?? []) {
+      where.push(`EXISTS (SELECT 1 FROM item_entity_index ei WHERE ei.item_id = ${alias}.id AND ei.entity = ?)`);
+      params.push(normalizeEntity(entity));
     }
     if (filters?.since) {
       where.push(`COALESCE(${alias}.occurred_at, ${alias}.created_at) >= ?`);
@@ -1244,8 +1295,14 @@ export function createItemsRepo(
     }
 
     if (mode === 'hybrid') {
+      // Lexical/entity hits already satisfy a bounded exact request. Avoid a
+      // full authorized-corpus cosine scan in that case; retain vector search
+      // for typo/semantic queries with no strong structured signal.
+      const strongLexical = sourceIds.lexical.size >= Math.min(opts.limit, 10);
+      const explicitEntity = Boolean(opts.entities?.length || opts.filters?.entity_filters?.length);
       for (const q of opts.queries) {
         if (!q.trim()) continue;
+        if (strongLexical || explicitEntity) continue;
         const queryVector = embeddingProvider.embedQuery(q);
         if (queryVector.length !== embeddingProvider.dimensions) {
           throw new Error(
@@ -1281,13 +1338,14 @@ export function createItemsRepo(
       );
       const entityTerms = [...new Set([...(opts.entities ?? []), ...inferredTerms])].slice(0, 20);
       for (const term of entityTerms) {
-        const normalized = term.normalize('NFKC').toLocaleLowerCase().trim();
+        const normalized = normalizeEntity(term);
         if (!normalized) continue;
         const escaped = normalized.replace(/[\\%_]/g, (char) => `\\${char}`);
         const where: string[] = [
           `EXISTS (
-             SELECT 1 FROM json_each(i.entities) entity
-             WHERE lower(entity.value) = ? OR lower(entity.value) LIKE ? ESCAPE '\\'
+             SELECT 1 FROM item_entity_index entity
+             WHERE entity.item_id = i.id
+               AND (entity.entity = ? OR entity.entity LIKE ? ESCAPE '\\')
            )`,
         ];
         const params: unknown[] = [normalized, `%${escaped}%`];
@@ -1395,6 +1453,143 @@ export function createItemsRepo(
   ): ContextItem[] {
     const { items } = list(access, { limit, sort: 'created', surface });
     return items;
+  }
+
+  /**
+   * Read-only, reviewer-facing hygiene suggestions. These are deliberately
+   * advisory: accepted rows are never merged, superseded, or edited here.
+   * Authorization still runs through applyFilters(); expired rows are included
+   * only so their cleanup can be suggested explicitly.
+   */
+  function curationSuggestions(
+    access: ReadAccess,
+    opts: { limit?: number } = {},
+  ): CurationSuggestion[] {
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const where: string[] = [];
+    const params: unknown[] = [];
+    applyFilters(where, params, {}, nowIso, access, 'accepted', 'i', true);
+    where.push("i.information_class = 'memory'");
+    const rows = db
+      .prepare(`SELECT i.* FROM context_items i WHERE ${where.join(' AND ')} ORDER BY i.updated_at DESC`)
+      .all(...params) as ItemRow[];
+    const items = rows.map(rowToItem);
+    const suggestions: CurationSuggestion[] = [];
+    const seen = new Set<string>();
+    const cap = Math.min(500, Math.max(1, opts.limit ?? 100));
+    const add = (suggestion: CurationSuggestion): void => {
+      const key = `${suggestion.kind}:${suggestion.item_id}:${suggestion.related_item_ids.join(',')}`;
+      if (seen.has(key) || suggestions.length >= cap) return;
+      seen.add(key);
+      suggestions.push(suggestion);
+    };
+    const textKey = (value: string): string =>
+      value.normalize('NFKC').trim().replace(/\s+/g, ' ').toLowerCase();
+    const tokenSimilarity = (left: string, right: string): number => {
+      const tokens = (value: string): Set<string> =>
+        new Set(textKey(value).match(/[a-z0-9]+|[\u3400-\u9fff]/g) ?? [textKey(value)]);
+      const a = tokens(left);
+      const b = tokens(right);
+      if (a.size === 0 && b.size === 0) return 1;
+      let intersection = 0;
+      for (const token of a) if (b.has(token)) intersection += 1;
+      return intersection / (a.size + b.size - intersection || 1);
+    };
+    const active = (item: ContextItem): boolean =>
+      item.status === 'active' &&
+      (!item.expires_at || item.expires_at > nowIso) &&
+      (!item.valid_from || item.valid_from <= nowIso) &&
+      (!item.valid_until || item.valid_until > nowIso);
+
+    const byContent = new Map<string, ContextItem[]>();
+    const byTitle = new Map<string, ContextItem[]>();
+    for (const item of items) {
+      if (!active(item)) continue;
+      const contentKey = `${textKey(item.title)}\n${textKey(item.content)}`;
+      const titleKey = `${textKey(item.title)}\n${item.memory_kind ?? ''}`;
+      byContent.set(contentKey, [...(byContent.get(contentKey) ?? []), item]);
+      byTitle.set(titleKey, [...(byTitle.get(titleKey) ?? []), item]);
+    }
+    for (const group of byContent.values()) {
+      if (group.length < 2) continue;
+      const first = group[0]!;
+      add({
+        kind: 'duplicate',
+        item_id: first.id,
+        related_item_ids: group.slice(1).map((item) => item.id),
+        title: first.title,
+        memory_kind: first.memory_kind,
+        reason: '相同 normalized title/content；請保留單一 accepted 記憶或建立 successor。',
+        severity: 'info',
+      });
+    }
+    for (const group of byTitle.values()) {
+      const contents = new Set(group.map((item) => textKey(item.content)));
+      if (group.length < 2 || contents.size < 2) continue;
+      // Similar title + highly overlapping content is a likely duplicate even
+      // when a timestamp, sentence, or minor formatting differs. Bound the
+      // pair scan so a malformed title cannot turn review into O(n²) work over
+      // an entire namespace.
+      const sample = group.slice(0, 50);
+      for (let left = 0; left < sample.length; left += 1) {
+        for (let right = left + 1; right < sample.length; right += 1) {
+          const first = sample[left]!;
+          const second = sample[right]!;
+          if (textKey(first.content) === textKey(second.content) || tokenSimilarity(first.content, second.content) < 0.8) {
+            continue;
+          }
+          add({
+            kind: 'duplicate',
+            item_id: first.id,
+            related_item_ids: [second.id],
+            title: first.title,
+            memory_kind: first.memory_kind,
+            reason: '相同 title/memory_kind 且內容高度相似；請人工確認是否保留單一 accepted 記憶或建立 successor。',
+            severity: 'info',
+          });
+        }
+      }
+      const first = group[0]!;
+      add({
+        kind: 'conflict',
+        item_id: first.id,
+        related_item_ids: group.slice(1).map((item) => item.id),
+        title: first.title,
+        memory_kind: first.memory_kind,
+        reason: '相同 title 與 memory_kind 但內容不同；請核對 validity、verified_at 或提出 successor。',
+        severity: 'warning',
+      });
+    }
+    for (const item of items) {
+      if (item.memory_kind === 'working_state' &&
+          ((item.valid_until && item.valid_until <= nowIso) || (item.expires_at && item.expires_at <= nowIso))) {
+        add({
+          kind: 'expired_working_state',
+          item_id: item.id,
+          related_item_ids: [],
+          title: item.title,
+          memory_kind: item.memory_kind,
+          reason: 'working_state 已過 valid_until/expires_at；請更新、封存或刪除。',
+          severity: 'warning',
+        });
+        continue;
+      }
+      const thresholdDays = item.memory_kind === 'experience' ? 90 : item.memory_kind === 'working_state' ? 30 : 180;
+      const reference = Date.parse(item.last_verified_at ?? item.updated_at ?? item.created_at);
+      if (Number.isFinite(reference) && now.getTime() - reference >= thresholdDays * 86_400_000) {
+        add({
+          kind: 'stale',
+          item_id: item.id,
+          related_item_ids: [],
+          title: item.title,
+          memory_kind: item.memory_kind,
+          reason: `超過 ${thresholdDays} 天未明確驗證；請補 last_verified_at 或提出 successor。`,
+          severity: 'warning',
+        });
+      }
+    }
+    return suggestions;
   }
 
   /**
@@ -1624,6 +1819,8 @@ export function createItemsRepo(
     return db.transaction((): { indexed: number; vectorIndexed: number } => {
       db.exec('DELETE FROM items_fts');
       db.exec('DELETE FROM item_embeddings');
+      db.exec('DELETE FROM item_tag_index');
+      db.exec('DELETE FROM item_entity_index');
       const rows = db
         .prepare(
           `SELECT rowid, id, title, content, tags, entities, state_kind FROM context_items
@@ -1692,6 +1889,7 @@ export function createItemsRepo(
     sourcesOverview,
     countCandidates,
     listCandidates,
+    curationSuggestions,
     brief,
     currentContext,
     getStateByKey,

@@ -247,6 +247,78 @@ describe('items-repo', () => {
     expect(sourced.items.map((i) => i.title).sort()).toEqual(['t3', 't4']);
   });
 
+  it('canonicalizes tags/entities and supports semantic facet filters through projections', () => {
+    const memory = insert('a', makeItem({
+      type: 'preference',
+      title: 'Canonical facet memory',
+      memory_kind: 'preference',
+      tags: [' Finance ', 'FINANCE', '生活'],
+      entities: ['Project:ContextHub', 'project:contexthub'],
+    })).item;
+    expect(memory.tags).toEqual(['finance', '生活']);
+    expect(memory.entities).toEqual(['project:contexthub']);
+    expect(env.db.prepare('SELECT tag FROM item_tag_index WHERE item_id = ? ORDER BY tag').all(memory.id)).toEqual([
+      { tag: 'finance' },
+      { tag: '生活' },
+    ]);
+    expect(env.db.prepare('SELECT entity FROM item_entity_index WHERE item_id = ?').all(memory.id)).toEqual([
+      { entity: 'project:contexthub' },
+    ]);
+
+    const byKind = env.itemsRepo.search(ADMIN_ACCESS, {
+      queries: ['canonical'],
+      filters: { information_classes: ['memory'], memory_kinds: ['preference'] },
+      limit: 10,
+      surface: 'accepted',
+    });
+    expect(byKind.items.map((item) => item.id)).toContain(memory.id);
+    const byEntity = env.itemsRepo.list(ADMIN_ACCESS, {
+      filters: { entity_filters: ['PROJECT:ContextHub'] },
+      limit: 10,
+      sort: 'created',
+      surface: 'accepted',
+    });
+    expect(byEntity.items.map((item) => item.id)).toContain(memory.id);
+  });
+
+  it('generates read-only curation suggestions without mutating accepted memory', () => {
+    const old = new Date(Date.now() - 200 * 86_400_000).toISOString();
+    const first = insert('a', makeItem({
+      type: 'fact',
+      memory_kind: 'fact',
+      title: '相同偏好',
+      content: '固定內容',
+      last_verified_at: old,
+    })).item;
+    const duplicate = insert('a', makeItem({
+      type: 'fact',
+      memory_kind: 'fact',
+      title: ' 相同偏好 ',
+      content: '固定內容',
+    })).item;
+    const nearDuplicate = insert('a', makeItem({
+      type: 'fact',
+      memory_kind: 'fact',
+      title: '相同偏好',
+      content: '固定內容!',
+    })).item;
+    const working = insert('a', makeItem({
+      type: 'task',
+      memory_kind: 'working_state',
+      title: '過期狀態',
+      valid_until: new Date(Date.now() - 1000).toISOString(),
+    })).item;
+    const suggestions = env.itemsRepo.curationSuggestions(ADMIN_ACCESS, { limit: 20 });
+    expect(suggestions.some((s) => s.kind === 'duplicate' &&
+      [s.item_id, ...s.related_item_ids].includes(first.id) &&
+      [s.item_id, ...s.related_item_ids].includes(duplicate.id))).toBe(true);
+    expect(suggestions.some((s) => s.kind === 'duplicate' &&
+      [s.item_id, ...s.related_item_ids].includes(nearDuplicate.id))).toBe(true);
+    expect(suggestions.some((s) => s.kind === 'stale' && s.item_id === first.id)).toBe(true);
+    expect(suggestions.some((s) => s.kind === 'expired_working_state' && s.item_id === working.id)).toBe(true);
+    expect(env.itemsRepo.get(ADMIN_ACCESS, first.id)!.revision).toBe(1);
+  });
+
   it('paginates with cursors without duplicates or gaps', () => {
     for (let i = 0; i < 5; i++) insert('a', makeItem({ title: `item ${i}` }));
     const seen: string[] = [];

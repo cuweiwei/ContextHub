@@ -1082,6 +1082,16 @@ export function createCommands(deps: CommandDeps) {
     );
   }
 
+  function curationSuggestions(client: ClientAuth, limit = 100) {
+    return readAudited(
+      client,
+      'read.curation_suggestions',
+      client.isAdmin ? null : 'memory.read_accepted',
+      { limit: Math.min(500, Math.max(1, limit)) },
+      (ctx) => itemsRepo.curationSuggestions(ctx.access, { limit }),
+    );
+  }
+
   function brief(client: ClientAuth, opts: Parameters<ItemsRepo['brief']>[1]) {
     return readAudited(client, 'read.brief', client.isAdmin ? null : 'memory.read_accepted', { days: opts.days }, (ctx) =>
       itemsRepo.brief(ctx.access, opts),
@@ -1304,6 +1314,7 @@ export function createCommands(deps: CommandDeps) {
     getItem,
     getHistory,
     listCandidates,
+    curationSuggestions,
     brief,
     currentContext,
     recent,

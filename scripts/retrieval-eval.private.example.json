@@ -1,0 +1,23 @@
+[
+  {
+    "id": "private-project-001",
+    "query": "replace with an owner-only query",
+    "expected_id": "replace-with-context-item-id",
+    "namespace": "personal",
+    "category": "person-project"
+  },
+  {
+    "id": "private-expiry-001",
+    "query": "replace with an expiry-sensitive query",
+    "expected_empty": true,
+    "namespace": "personal",
+    "category": "expired"
+  },
+  {
+    "id": "private-isolation-001",
+    "query": "replace with a work-only query",
+    "expected_empty": true,
+    "namespace": "personal",
+    "category": "cross-namespace"
+  }
+]

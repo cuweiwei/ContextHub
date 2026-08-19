@@ -34,6 +34,32 @@ export interface SourcePayload {
   source_uri: string | null | undefined;
 }
 
+/**
+ * Canonical metadata used by retrieval filters and rebuildable projections.
+ * The original display values remain in context_items; these values provide a
+ * stable comparison key so equivalent labels do not create separate buckets.
+ */
+export function normalizeTag(value: string): string {
+  return value.normalize('NFKC').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+export function normalizeEntity(value: string): string {
+  const normalized = value.normalize('NFKC').trim().replace(/\s+/g, ' ');
+  const separator = normalized.indexOf(':');
+  if (separator <= 0) return normalized.toLowerCase();
+  const kind = normalized.slice(0, separator).trim().toLowerCase();
+  const identifier = normalized.slice(separator + 1).trim().toLowerCase();
+  return identifier ? `${kind}:${identifier}` : kind;
+}
+
+export function canonicalTags(values: readonly string[]): string[] {
+  return [...new Set(values.map(normalizeTag).filter(Boolean))].sort();
+}
+
+export function canonicalEntities(values: readonly string[]): string[] {
+  return [...new Set(values.map(normalizeEntity).filter(Boolean))].sort();
+}
+
 export function canonicalizeSourcePayload(p: SourcePayload): string {
   return JSON.stringify(
     normalize({
@@ -42,7 +68,7 @@ export function canonicalizeSourcePayload(p: SourcePayload): string {
       content: p.content,
       data: p.data ?? null,
       occurred_at: p.occurred_at ?? null,
-      entities: [...new Set(p.entities.map((e) => e.normalize('NFC')))].sort(),
+      entities: canonicalEntities(p.entities),
       source_uri: p.source_uri ?? null,
     }),
   );

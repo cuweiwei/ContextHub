@@ -224,6 +224,11 @@ export interface ListFilters {
   sources?: string[];
   types?: string[];
   tags?: string[];
+  /** Exact semantic role filters; unlike query inference these are hard filters. */
+  information_classes?: InformationClass[];
+  memory_kinds?: MemoryKind[];
+  /** Exact canonical entity identifiers, e.g. project:contexthub. */
+  entity_filters?: string[];
   statuses?: ItemStatus[];
   since?: string;
   until?: string;

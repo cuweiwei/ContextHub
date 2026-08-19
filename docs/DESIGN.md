@@ -20,7 +20,7 @@ AI agents 對使用者的理解破碎:財務在記帳 app、人際在 CRM、工�
 
 1. **對 AI 記憶,hub 是 system of record**:版本歷史、審核事件、衝突裁決都保存在 hub,永久 append-only。
 2. **對 app 資料,hub 仍是 projection**:寫進來的是「AI 決策有用的投影」,原始明細留在來源 app(`source_uri` 回連)。
-3. **SQLite `context_items` 是唯一權威儲存；FTS 與 `item_embeddings` 都只是可完全重建的 projection**（`reindex` 隨時全量重建；restore／v6 upgrade 後必跑）。
+3. **SQLite `context_items` 是唯一權威儲存；FTS、`item_embeddings` 與 normalized tag/entity facets 都只是可完全重建的 projection**（`reindex` 隨時全量重建；restore／schema upgrade 後必跑）。
 4. **單一 active instance、單一 writer**(啟動時 exclusive lock 強制,第二個 instance fail fast)。
 5. **未經 owner 明確同意:不建立替代權威儲存、不遷移、不切換。**
 6. **Memory ≠ Context**：Memory 回答「應該長期保留什麼」；Context Compiler 回答「這次模型應該看到什麼」。
@@ -148,12 +148,13 @@ ContextHub 不保存全部 chat history。Memory formation 使用既有安全路
 
 1. **Lexical**：FTS5 unicode61、CJK 對稱切分、BM25；零命中時才用 bounded LIKE fallback。
 2. **Vector**：`sqlite-vec` 的 `vec_distance_cosine()`，對 `local-feature-hash-v1` 384 維本地 embedding 做 exact top-k。此 provider 同步、無網路、可注入替換；預設強項是 typo／形近與欄位加權，不冒充 neural semantic model。
-3. **Entity**：`entities` JSON array 的 exact／partial structured match；client 可明確傳 entity hints，query tokens 也會做保守推斷。
-4. **State**：operational state 不進一般索引；只由 compiler 對明確 `state_keys` 套 exact state rule 後加入。
+3. **Entity**：`entities` JSON array 的 exact／partial structured match；client 可明確傳 entity hints，query tokens 也會做保守推斷。寫入時以 NFKC、空白、大小寫與重複值正規化，entity 建議採 `<kind>:<canonical-id>`。
+4. **Semantic facets**：`information_class`、`memory_kind` 與 exact `entity_filters` 可由 caller 明確指定為硬過濾；query 自動推斷只作 boost，不自動把結果鎖死在某一分類。
+5. **State**：operational state 不進一般索引；只由 compiler 對明確 `state_keys` 套 exact state rule 後加入。
 
 每一路候選 SQL 都在排名前呼叫同一個 `applyFilters()`：namespace → deleted/expiry/validity → trust surface → source/evidence ACL → sensitivity → type/status/tag/time。未授權 row 不會先成為 application-level candidate 再被丟棄。候選以 weighted Reciprocal Rank Fusion 合併，再乘 lifecycle/decay/confidence；回傳每筆 `retrieval_sources` 以及 mode、model、各路 candidate counts、elapsed time，方便 eval 與除錯，但 audit 不保存 query text。
 
-`item_embeddings` 只保存 item id、model、dimensions、content hash、BLOB vector 與時間；不保存第二份內容，也不承擔 namespace/trust 真相。create/update/delete 與 projection 同 transaction 更新；`reindex` 會先清空 FTS/vector，再從 `context_items` 重建。`retrieval-status` 與 `/health.retrieval_projection` 回報 model/version/coverage。Migration v7 不在 migration transaction 計算舊資料 embeddings；升級後服務仍可 lexical fallback，但部署驗收必跑 `reindex` 直到 `ready=true`。
+`item_embeddings` 只保存 item id、model、dimensions、content hash、BLOB vector 與時間；`item_tag_index`／`item_entity_index` 同樣只保存可重建的 normalized facet keys；它們不保存第二份內容，也不承擔 namespace/trust 真相。create/update/delete 與 projection 同 transaction 更新；`reindex` 會先清空 FTS/vector/facet projections，再從 `context_items` 重建。`retrieval-status` 與 `/health.retrieval_projection` 回報 model/version/coverage。Migration v7/v9 不在 migration transaction 計算舊資料 embeddings；升級後服務仍可 lexical fallback，但部署驗收必跑 `reindex` 直到 `ready=true`。
 
 ## 7. Context Compiler
 
@@ -192,7 +193,8 @@ Compiler 回傳 `package_id`、sections、constraints、estimated tokens 與 `re
 |---|---|
 | `POST /v1/items` | create_memory:trust 由 create_rules 決定;`idempotency_key` 必填;per-type upsert 同 §4 |
 | `POST /v1/items/batch` | ≤100 筆單 transaction;`Idempotency-Key` header 必填 |
-| `GET /v1/items` | 搜尋/列表(預設 `retrieval_mode=hybrid`，可設 lexical；`entity` hints；accepted 面) |
+| `GET /v1/items` | 搜尋/列表(預設 `retrieval_mode=hybrid`，可設 lexical；`entity` hints；`information_class`、`memory_kind`、`entity_exact` 硬過濾；accepted 面) |
+| `GET /v1/curation-suggestions` | 只讀回傳 duplicate/conflict/stale/expired `working_state` 建議，不會修改 accepted Memory |
 | `GET /v1/items/:id` | 無權/跨 namespace/不存在同回 404 |
 | `GET /v1/items/:id/history` | 版本快照+審核事件 |
 | `PATCH /v1/items/:id` | 僅 service/human 改**自己的**投影(insight/transaction/operational 不可);agent 一律 403;`expected_revision`+`Idempotency-Key` 必填 |
@@ -212,11 +214,11 @@ Compiler 回傳 `package_id`、sections、constraints、estimated tokens 與 `re
 | `POST /v1/clients`(namespace+principal_kind 必填,選配 profile)、`POST /v1/clients/:id/rotate-key`、`PATCH /v1/clients/:id`、`GET/POST /v1/namespaces`、`GET/PUT /v1/state-schemas/:id` | 管理(admin) |
 | `GET /health` | 監控(audit_writable、disk_free_bytes、retrieval_projection) |
 
-## 11. MCP tools(18 個)
+## 11. MCP tools(19 個)
 
 Endpoint `POST /mcp`(Streamable HTTP stateless)。連線=namespace 邊界。
 
-讀取面：`compile_context`（短暫 package，包含 retrieval diagnostics）、`search_context`（`mode=hybrid|lexical`、entity hints、`include_candidates`=自己的）、`get_current_context`、`get_recent_context`、`get_context_item`、`get_context_brief`、`list_context_sources`、`get_memory_history`、`my_candidates`。
+讀取面：`compile_context`（短暫 package，包含 retrieval diagnostics）、`search_context`（`mode=hybrid|lexical`、entity hints、`information_classes`、`memory_kinds`、`entity_filters`、`include_candidates`=自己的）、`curation_suggestions`（只讀 hygiene 建議）、`get_current_context`、`get_recent_context`、`get_context_item`、`get_context_brief`、`list_context_sources`、`get_memory_history`、`my_candidates`。
 
 記憶／回饋生命週期：`save_memory`（通用建立＋memory_kind/validity/decay）、`propose_insight`、`revise_my_candidate`、`propose_successor`、`record_context_outcome`、`operate_task`、`curate_note`、`update_operational_state`、`get_operational_state`。
 
@@ -234,7 +236,7 @@ Endpoint `POST /mcp`(Streamable HTTP stateless)。連線=namespace 邊界。
 
 FTS5 unicode61 + 字級切分（索引與查詢對稱），2 字中文詞可搜；BM25 + local cosine vector + entity candidates 以 weighted RRF 合併，再乘 lifecycle weighting。明確 `decay_policy=none/standard/rapid` 分別為不衰減／90 天／14 天 half-life；`last_verified_at` 優先作為 freshness 基準；insight 乘 confidence。
 
-`npm run benchmark:retrieval -- --items=2000` 會在 in-memory DB 建立可重現 synthetic corpus，比較 lexical/hybrid 的 Recall@5、MRR、p50/p95，並驗證 typo、CJK、entity case。這是 regression benchmark，不等同真實個人資料的 relevance gold set；上線後應另建立不含敏感內容的 query→expected-id eval set。精確向量掃描的成本隨授權後 corpus 線性成長；若實測 p95 超過目標，再以同一 provider/ACL contract 導入 vec0 partition/ANN，而不是先犧牲授權正確性。
+`scripts/retrieval-eval.json` 提供 60 個不含敏感資料的 exact、CJK、entity、typo 案例；`scripts/retrieval-eval.private.example.json` 是 owner-only eval 的格式範本，複製成被 `.gitignore` 排除的 `scripts/retrieval-eval.private.json` 後，補入人物／專案、同義詞、過期、successor 與跨 namespace gold set。`npm run benchmark:retrieval -- --items=N` 會在 in-memory DB 比較 lexical/hybrid 的 Success@1、Recall@5、MRR、p50/p95，hybrid regression 會非零退出。公開 regression 不等同真實個人資料 relevance gold set；私人 eval 不得把 query、expected ids 或原文提交到 repo。精確向量掃描的成本隨授權後 corpus 線性成長；先以每 namespace 100,000 筆、NAS p95 250 ms 作容量 gate，未達標才另立 ADR 導入 ACL-safe 分區／近似索引。
 
 ## 14. 部署、備份、還原(NAS)
 

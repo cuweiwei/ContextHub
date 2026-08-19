@@ -1,10 +1,11 @@
 import { performance } from 'node:perf_hooks';
+import fs from 'node:fs';
 import { createItemsRepo, type TrustDecision, type WriteContext } from '../src/core/items-repo.js';
 import { newItemSchema, type ReadAccess } from '../src/core/types.js';
 import { openDatabase } from '../src/db/connection.js';
 
 const requested = Number(process.argv.find((arg) => arg.startsWith('--items='))?.split('=')[1] ?? 2000);
-const itemCount = Number.isFinite(requested) ? Math.max(100, Math.min(20_000, requested)) : 2000;
+const itemCount = Number.isFinite(requested) ? Math.max(100, Math.min(100_000, requested)) : 2000;
 const db = openDatabase(':memory:', { synchronous: 'NORMAL' });
 const repo = createItemsRepo(db);
 
@@ -70,17 +71,13 @@ for (let i = 3; i < itemCount; i += 1) {
   );
 }
 
-const cases = [
-  { name: 'exact', query: 'NAS deployment checklist', expected: targets.get('exact')! },
-  { name: 'typo', query: 'ContextHbu deploymnt cheklist', expected: targets.get('exact')! },
-  { name: 'cjk', query: '醫療險', expected: targets.get('cjk')! },
-  {
-    name: 'entity',
-    query: 'what is the current project decision',
-    entities: ['project:Orion'],
-    expected: targets.get('entity')!,
-  },
-];
+const evalCases = JSON.parse(
+  fs.readFileSync(new URL('./retrieval-eval.json', import.meta.url), 'utf8'),
+) as { id: string; query: string; target: string; entities?: string[] }[];
+const cases = evalCases.map((testCase) => ({
+  ...testCase,
+  expected: targets.get(testCase.target)!,
+}));
 
 function percentile(values: number[], p: number): number {
   const sorted = [...values].sort((a, b) => a - b);
@@ -90,6 +87,7 @@ function percentile(values: number[], p: number): number {
 function evaluate(mode: 'lexical' | 'hybrid') {
   const latencies: number[] = [];
   let recalled = 0;
+  let successAt1 = 0;
   let reciprocalRank = 0;
   const details = [];
   for (let round = 0; round < 10; round += 1) {
@@ -109,8 +107,10 @@ function evaluate(mode: 'lexical' | 'hybrid') {
           recalled += 1;
           reciprocalRank += 1 / rank;
         }
-        details.push({
-          case: testCase.name,
+        if (rank === 1) successAt1 += 1;
+        if (details.length < 20) details.push({
+          case: testCase.target,
+          id: testCase.id,
           rank: rank || null,
           sources: rank > 0 ? result.items[rank - 1]!.retrieval_sources : [],
         });
@@ -119,7 +119,9 @@ function evaluate(mode: 'lexical' | 'hybrid') {
   }
   return {
     recall_at_5: Number((recalled / cases.length).toFixed(3)),
+    success_at_1: Number((successAt1 / cases.length).toFixed(3)),
     mrr: Number((reciprocalRank / cases.length).toFixed(3)),
+    case_count: cases.length,
     latency_ms: {
       p50: Number(percentile(latencies, 0.5).toFixed(3)),
       p95: Number(percentile(latencies, 0.95).toFixed(3)),

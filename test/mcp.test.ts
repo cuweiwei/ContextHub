@@ -84,6 +84,7 @@ describe('MCP endpoint', () => {
     expect(tools.map((t) => t.name).sort()).toEqual([
       'compile_context',
       'curate_note',
+      'curation_suggestions',
       'get_context_brief',
       'get_context_item',
       'get_current_context',
@@ -121,6 +122,20 @@ describe('MCP endpoint', () => {
       expect(item.status).toBe('active');
       expect(item.trust_state).toBe('accepted');
     }
+    const filtered = payload(
+      await client.callTool({
+        name: 'search_context',
+        arguments: {
+          query: '生日',
+          information_classes: ['source'],
+          entity_filters: ['PERSON:小美'],
+        },
+      }),
+    );
+    expect(filtered.total_matched).toBe(1);
+    expect(filtered.items[0].title).toContain('小美');
+    const suggestions = payload(await client.callTool({ name: 'curation_suggestions', arguments: { limit: 10 } }));
+    expect(Array.isArray(suggestions.suggestions)).toBe(true);
     await client.close();
   });
 
@@ -208,6 +223,7 @@ describe('MCP endpoint', () => {
           type: 'preference',
           title: '使用者偏好深色主題',
           content: '多次要求 dark mode',
+          memory_kind: 'preference',
           idempotency_key: randomUUID(),
         },
       }),
@@ -245,6 +261,7 @@ describe('MCP endpoint', () => {
           type: 'insight',
           title: '使用者月底會控制餐飲支出',
           content: '從預算資料推導',
+          memory_kind: 'experience',
           confidence: 0.8,
           derived_from: [budgetItemId],
           source_item_id: 'dining-pattern',
@@ -290,7 +307,7 @@ describe('MCP endpoint', () => {
     const client = await connect(agentKey);
     const bad: any = await client.callTool({
       name: 'propose_insight',
-      arguments: { type: 'insight', title: 'x', derived_from: ['does-not-exist'], idempotency_key: randomUUID() },
+      arguments: { type: 'insight', title: 'x', memory_kind: 'experience', derived_from: ['does-not-exist'], idempotency_key: randomUUID() },
     });
     expect(bad.isError).toBe(true);
 
@@ -305,6 +322,7 @@ describe('MCP endpoint', () => {
         arguments: {
           type: 'insight',
           title: '從私密資料推導',
+          memory_kind: 'experience',
           sensitivity: 'normal',
           derived_from: [secretId],
           idempotency_key: randomUUID(),
@@ -425,7 +443,7 @@ describe('MCP endpoint', () => {
     const saved = payload(
       await client.callTool({
         name: 'save_memory',
-        arguments: { type: 'note', title: 'MCP 寫入的筆記', idempotency_key: randomUUID() },
+        arguments: { type: 'note', title: 'MCP 寫入的筆記', memory_kind: 'experience', idempotency_key: randomUUID() },
       }),
     );
     const restRead = await env.app.inject({
@@ -443,7 +461,7 @@ describe('MCP endpoint', () => {
     const client = await connect(readOnlyKey);
     const result: any = await client.callTool({
       name: 'propose_insight',
-      arguments: { type: 'insight', title: 'nope', content: '', idempotency_key: randomUUID() },
+      arguments: { type: 'insight', title: 'nope', memory_kind: 'experience', content: '', idempotency_key: randomUUID() },
     });
     expect(result.isError).toBe(true);
     await client.close();

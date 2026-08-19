@@ -128,6 +128,18 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
         sources: z.array(z.string()).optional().describe('Filter by source client ids (see list_context_sources)'),
         tags: z.array(z.string()).optional().describe('Only items carrying ALL of these tags'),
         entities: z.array(z.string()).optional().describe('Boost exact/partial structured entity matches'),
+        entity_filters: z
+          .array(z.string().min(1).max(200))
+          .optional()
+          .describe('Exact canonical entities to require, e.g. ["project:contexthub"]'),
+        information_classes: z
+          .array(z.enum(['source', 'memory', 'task_state']))
+          .optional()
+          .describe('Hard filter for persistent information role'),
+        memory_kinds: z
+          .array(z.enum(MEMORY_KINDS))
+          .optional()
+          .describe('Hard filter for reusable memory semantics'),
         mode: z.enum(['hybrid', 'lexical']).default('hybrid'),
         since: z.string().optional().describe('Only items on/after this ISO 8601 datetime'),
         until: z.string().optional().describe('Only items on/before this ISO 8601 datetime'),
@@ -152,6 +164,9 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
           types: args.types,
           sources: args.sources,
           tags: args.tags,
+          information_classes: args.information_classes,
+          memory_kinds: args.memory_kinds,
+          entity_filters: args.entity_filters,
           since: normalizeIso(args.since),
           until: normalizeIso(args.until),
           sensitivity,
@@ -190,6 +205,22 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
       if (!canRead) throw new PolicyDeniedError('this API key lacks the "read" scope');
       const { sensitivity, note } = resolveSensitivity(args.include_private);
       return { note, ...commands.currentContext(client, { sensitivity, perSection: args.per_section }) };
+    }),
+  );
+
+  server.registerTool(
+    'curation_suggestions',
+    {
+      title: 'Find memory hygiene suggestions',
+      description:
+        'Read-only suggestions for duplicate, conflicting, stale, or expired working_state memories. Suggestions never mutate accepted memory; use human review and successor workflows to act on them.',
+      inputSchema: {
+        limit: z.number().int().min(1).max(100).default(50),
+      },
+    },
+    guarded((args: any) => {
+      if (!canRead) throw new PolicyDeniedError('this API key lacks the "read" scope');
+      return { suggestions: commands.curationSuggestions(client, args.limit) };
     }),
   );
 
@@ -336,6 +367,9 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
         sources: z.array(z.string()).max(50).optional(),
         types: z.array(z.string()).max(50).optional(),
         tags: z.array(z.string()).max(50).optional(),
+        information_classes: z.array(z.enum(['source', 'memory', 'task_state'])).max(3).optional(),
+        memory_kinds: z.array(z.enum(MEMORY_KINDS)).max(MEMORY_KINDS.length).optional(),
+        entity_filters: z.array(z.string().min(1).max(200)).max(50).optional(),
         state_keys: z
           .array(z.string().min(1).max(200))
           .max(20)
@@ -352,7 +386,15 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
         queries: args.queries,
         target: args.target_agent,
         tokenBudget: args.token_budget,
-        filters: { sources: args.sources, types: args.types, tags: args.tags, sensitivity },
+        filters: {
+          sources: args.sources,
+          types: args.types,
+          tags: args.tags,
+          information_classes: args.information_classes,
+          memory_kinds: args.memory_kinds,
+          entity_filters: args.entity_filters,
+          sensitivity,
+        },
         stateKeys: args.state_keys,
         entities: args.entities,
       });
@@ -382,8 +424,7 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
     confidence: z.number().min(0).max(1).optional().describe('How sure you are (insights)'),
     memory_kind: z
       .enum(MEMORY_KINDS)
-      .optional()
-      .describe('Reusable semantics: fact/preference/decision/experience/procedure/relationship/working_state. Omit for a source projection.'),
+      .describe('Required reusable semantics: fact/preference/decision/experience/procedure/relationship/working_state.'),
     derived_from: z
       .array(z.string())
       .max(20)

@@ -122,6 +122,7 @@ const REVIEW_HTML = String.raw`<!doctype html>
     }
     pre { color: #bdd2cc; font-size: 12px; overflow: auto; }
     .review-box { margin-top: 24px; padding: 15px; border-radius: 14px; background: rgba(244, 189, 104, .055); border: 1px solid rgba(244, 189, 104, .25); }
+    .quality-warning { color: var(--amber); background: rgba(244, 189, 104, .08); border: 1px solid rgba(244, 189, 104, .25); }
     .actions { display: flex; gap: 9px; justify-content: flex-end; margin-top: 10px; }
     .timeline { display: grid; gap: 8px; }
     .event { padding: 11px 13px; border-left: 2px solid var(--line); background: rgba(255,255,255,.018); }
@@ -198,6 +199,10 @@ const REVIEW_HTML = String.raw`<!doctype html>
           <section id="evidence-section" class="section hidden">
             <h3>Evidence / 關聯</h3>
             <div id="evidence" class="content"></div>
+          </section>
+          <section id="quality-section" class="section hidden">
+            <h3>分類品質提醒</h3>
+            <div id="quality" class="content quality-warning"></div>
           </section>
           <section class="section">
             <h3>版本與裁決歷史</h3>
@@ -345,6 +350,26 @@ const REVIEW_HTML = String.raw`<!doctype html>
         }
       }
 
+      function renderQualityWarnings(item) {
+        const warnings = [];
+        if (item.information_class === "memory" && !item.memory_kind) {
+          warnings.push("Memory 缺少 memory_kind；接受前請確認它是 fact、preference、decision、experience、procedure、relationship 或 working_state。");
+        }
+        if (item.information_class === "memory" && (!item.entities || !item.entities.length)) {
+          warnings.push("尚未標記 entities；若內容涉及人物、專案、裝置或來源，請補上 canonical entity。");
+        }
+        if (item.information_class === "memory" && !item.valid_from && !item.valid_until && !item.expires_at) {
+          warnings.push(item.memory_kind === "working_state"
+            ? "working_state 沒有 valid_until 或 expires_at，可能長期污染目前脈絡。"
+            : "尚未標記 valid_from、valid_until 或 expires_at；接受前請確認這筆 Memory 的時效範圍。");
+        }
+        if (["fact", "preference", "decision", "procedure", "relationship"].includes(item.memory_kind) && !item.last_verified_at) {
+          warnings.push("耐久 Memory 尚未記錄 last_verified_at；接受前請確認是否已有查證依據。");
+        }
+        byId("quality-section").classList.toggle("hidden", warnings.length === 0);
+        byId("quality").textContent = warnings.join("\n\n");
+      }
+
       async function selectItem(id) {
         setStatus("review-status", "", false);
         try {
@@ -376,6 +401,10 @@ const REVIEW_HTML = String.raw`<!doctype html>
           addFact("狀態", selected.status);
           addFact("信心", selected.confidence == null ? "—" : selected.confidence);
           addFact("Successor of", selected.successor_of || "—");
+          addFact("資訊角色", selected.information_class || "—");
+          addFact("Memory 類型", selected.memory_kind || "—");
+          addFact("最後驗證", formatTime(selected.last_verified_at));
+          renderQualityWarnings(selected);
           byId("content").textContent = selected.content || "（無內容）";
 
           const hasData = selected.data !== null && selected.data !== undefined;

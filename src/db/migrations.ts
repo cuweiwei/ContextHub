@@ -520,6 +520,54 @@ const MIGRATIONS: {
       );
     `,
   },
+  {
+    version: 9,
+    name: 'canonical-retrieval-facets',
+    sql: `
+      -- Rebuildable metadata projections. context_items.tags/entities remain
+      -- the only domain authority; these tables only accelerate exact facet
+      -- filters and entity candidate lookup after ACL predicates are applied.
+      CREATE TABLE item_tag_index (
+        item_id TEXT NOT NULL REFERENCES context_items(id) ON DELETE CASCADE,
+        tag TEXT NOT NULL,
+        PRIMARY KEY (item_id, tag)
+      );
+      CREATE INDEX idx_item_tag_index_tag ON item_tag_index(tag, item_id);
+
+      CREATE TABLE item_entity_index (
+        item_id TEXT NOT NULL REFERENCES context_items(id) ON DELETE CASCADE,
+        entity TEXT NOT NULL,
+        PRIMARY KEY (item_id, entity)
+      );
+      CREATE INDEX idx_item_entity_index_entity ON item_entity_index(entity, item_id);
+    `,
+    post: (db) => {
+      const normalize = (value: string): string => value.normalize('NFKC').trim().replace(/\s+/g, ' ').toLowerCase();
+      const entity = (value: string): string => {
+        const normalized = normalize(value);
+        const separator = normalized.indexOf(':');
+        if (separator <= 0) return normalized;
+        const kind = normalized.slice(0, separator).trim();
+        const identifier = normalized.slice(separator + 1).trim();
+        return identifier ? `${kind}:${identifier}` : kind;
+      };
+      const insertTag = db.prepare('INSERT OR IGNORE INTO item_tag_index (item_id, tag) VALUES (?, ?)');
+      const insertEntity = db.prepare('INSERT OR IGNORE INTO item_entity_index (item_id, entity) VALUES (?, ?)');
+      const rows = db.prepare('SELECT id, tags, entities FROM context_items').all() as {
+        id: string;
+        tags: string;
+        entities: string;
+      }[];
+      for (const row of rows) {
+        for (const tag of new Set((JSON.parse(row.tags) as string[]).map(normalize).filter(Boolean))) {
+          insertTag.run(row.id, tag);
+        }
+        for (const value of new Set((JSON.parse(row.entities) as string[]).map(entity).filter(Boolean))) {
+          insertEntity.run(row.id, value);
+        }
+      }
+    },
+  },
 ];
 
 export function migrate(db: Database.Database): void {
