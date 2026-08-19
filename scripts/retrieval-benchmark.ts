@@ -5,6 +5,8 @@ import { newItemSchema, type ReadAccess } from '../src/core/types.js';
 import { openDatabase } from '../src/db/connection.js';
 
 const requested = Number(process.argv.find((arg) => arg.startsWith('--items='))?.split('=')[1] ?? 2000);
+const MIN_RETRIEVAL_SCORE = 0.823; // baseline 0.833 minus the allowed 0.01 regression
+const MAX_P95_MS = 250;
 const itemCount = Number.isFinite(requested) ? Math.max(100, Math.min(100_000, requested)) : 2000;
 const db = openDatabase(':memory:', { synchronous: 'NORMAL' });
 const repo = createItemsRepo(db);
@@ -140,6 +142,13 @@ const report = {
 console.log(JSON.stringify(report, null, 2));
 db.close();
 
-if (report.hybrid.recall_at_5 < report.lexical.recall_at_5 || report.hybrid.recall_at_5 < 0.75) {
+if (
+  report.hybrid.recall_at_5 < MIN_RETRIEVAL_SCORE ||
+  report.hybrid.success_at_1 < MIN_RETRIEVAL_SCORE ||
+  report.hybrid.recall_at_5 < report.lexical.recall_at_5 ||
+  report.hybrid.success_at_1 < report.lexical.success_at_1 ||
+  report.hybrid.latency_ms.p95 > MAX_P95_MS
+) {
+  console.error(`retrieval gate failed: Recall@5/Success@1 >= ${MIN_RETRIEVAL_SCORE}, hybrid >= lexical, p95 <= ${MAX_P95_MS}ms`);
   process.exitCode = 1;
 }

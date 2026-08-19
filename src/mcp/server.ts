@@ -1,5 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import { buildInfo } from '../build-info.js';
 import type { AppDeps } from '../http/server.js';
 import { toCompact } from '../core/items-repo.js';
 import {
@@ -73,7 +74,7 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
       ? ' In work, save only extracted summaries, tasks, decisions, and work preferences; never store raw email, chat, meeting transcripts, PII, customer data, undisclosed financials, or confidential technical details.'
       : '';
   const server = new McpServer(
-    { name: 'contexthub', version: '0.5.0' },
+    { name: 'contexthub', version: buildInfo.version },
     {
       instructions:
         `ContextHub is the context control plane for namespace "${client.namespace}": source projections and durable memory remain persistent; compiled context is ephemeral. ` +
