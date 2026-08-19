@@ -19,29 +19,35 @@
 
 ### P0 — 先讓每日使用與發布可信
 
-1. **CHB-001｜CI、版本與發布證據單一化｜M｜ready**
+1. **CHB-001｜CI、版本與發布證據單一化｜M｜done**
    - 建立 Node 22 CI：`npm ci`、tests、E2E、production audit、benchmark regression、`git diff --check`、secret/generated DB 檢查。
    - 以 `package.json` 作為版本唯一來源，修正 MCP 仍回報舊版號的漂移；health/settings 顯示 build commit、schema 與 retrieval model，但不洩漏 secret。CI log 不得輸出完整 demo/enrollment/client key。
 
-2. **CHB-002｜完整 Agent enrollment 與 credential lifecycle｜M｜ready**
+2. **CHB-002｜完整 Agent enrollment 與 credential lifecycle｜M｜done**
    - Control Center 建立 Agent 後要單次顯示、複製、到期倒數與關閉即不可重取的 enrollment code；支援撤銷、重新配對與安全錯誤提示。
    - Agent 詳情顯示 namespace、有效權限、最近活動、credential version 與 enrollment 狀態；re-enroll、disable 需 fresh session 和 ID confirmation。測試 exchange、replay、expired、locked、CSRF、no-store、no-log。
 
-3. **CHB-003｜維運 Doctor 與可信狀態面板｜M｜ready**
+3. **CHB-003｜維運 Doctor 與可信狀態面板｜M｜done**
    - 新增唯讀 `cli doctor`，檢查 SQLite quick check、audit 可寫、migration、projection coverage、磁碟、最近備份、restore drill、idempotency GC 與版本一致性。
    - `/health` 只回傳無敏感資訊的 readiness；詳細狀態只在已認證 Control Center 顯示。每個失敗條件都要有非零 exit code 與修復提示。
 
-4. **CHB-004｜可自動驗證的備份、還原與升級 gate｜M｜ready**
+4. **CHB-004｜可自動驗證的備份、還原與升級 gate｜M｜done**
    - 備份附 schema/model/build/checksum manifest；每月在隔離目錄執行 restore → reindex → health → query → history 驗證。
    - migration 前自動 snapshot；失敗時優先回復 image，不誤還原舊 DB。演練不得碰 production DB，結果只留不含內容的維運紀錄。
 
-5. **CHB-005｜Control Center 前端基礎、namespace 與 session 管理｜L｜proposed**
+5. **CHB-005｜Control Center 前端基礎、namespace 與 session 管理｜L｜done**
    - 維持 dependency-light、same-origin、無 CDN 的 vanilla ES modules；拆分目前內嵌 UI，建立共用元件與 Playwright browser tests。
    - 所有頁面提供 namespace selector；Settings 顯示 sessions、到期時間、撤銷其他 session 與 logout；修正 dashboard 樣本數誤當總數。覆蓋 keyboard/mobile/loading/error states。
 
-6. **CHB-006｜Memory Explorer 與單筆 Review Workbench｜L｜proposed**
+6. **CHB-006｜Memory Explorer 與單筆 Review Workbench｜L｜done**
    - 加入 facets、日期、trust、source、sensitivity、entity、memory kind、validity、status 篩選及 cursor pagination。
    - 詳情顯示 provenance、版本、reviews、predecessor/successor、evidence、policy acceptance reason 與 curation suggestions；accepted Memory 只能以 successor 修正。
+
+### P0 implementation evidence（PR #2）
+
+- Branch：`codex/p0-backlog`；ticket-scoped commits `c57ae75`、`83706cc`、`4e3d939`、`a746e69`、`ecbdba6`、`ef38482`。
+- Local checks：115 tests、34 E2E checks、Playwright browser smoke pass、retrieval 2,000-item hybrid Recall@5/Success@1 `0.833`、p95 `5.49 ms`、`npm audit --omit=dev` 0 vulnerabilities、hygiene/diff check pass。
+- PR CI：兩個 workflow runs 全綠；[push run](https://github.com/cuweiwei/ContextHub/actions/runs/32265442165)、[pull request run](https://github.com/cuweiwei/ContextHub/actions/runs/32265458799)。未建立 tag、未發布 GHCR image、未部署 NAS。
 
 ### P1 — 完成 Owner 治理與資料品質
 
