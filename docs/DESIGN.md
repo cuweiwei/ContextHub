@@ -259,19 +259,8 @@ docker compose exec contexthub node dist/cli.js retrieval-status # ready 必須�
 
 ## 15. Roadmap(v7+)
 
-| 項目 | 接縫 |
-|---|---|
-| Neural local embedding | 注入 `LocalEmbeddingProvider`，先以真實 eval 證明 synonym recall 改善；model 檔仍只在 owner 硬體 |
-| ANN / vec0 partition | 當真實 corpus benchmark 證明 exact scan p95 不足，再導入；ACL contract 不變 |
-| Entity 圖譜 traversal | v6 已有 entity candidate source；後續增加 canonical nodes/edges 與 bounded traversal |
-| insight-as-evidence | 需 recursive CTE evidence closure + 環檢測 |
-| Tamper-evident audit(hash chain) | audit_log append-only 已就緒 |
-| Human UI | `/explore` 與 `/review` 保留 reviewer-key legacy 入口；Control Center 透過 Tailscale HTTPS identity 提供 `/dashboard`、namespace、policy、audit 與設定管理；後續可加批次審核 |
-| 訂閱/推播 | 單一寫入路徑(commands)易掛 hook |
-| Memory consolidation suggestions | 以 outcome ledger + similarity 找候選 merge/successor；仍需 human review |
-| Runtime-input adapter | 可選擇把不持久化的 instructions/tool outputs 納入同一次 budget；預設仍由 agent runtime 組裝 |
-| 簡繁互轉搜尋 | query 側加轉換層 |
-| 公網 hardening(HTTPS/rate limit) | 目前威脅模型=LAN/Tailscale 私網 |
+完整的 12–18 個月、Owner-first 優先序、依賴、驗收條件與 deferred scope 見
+[docs/BACKLOG.md](BACKLOG.md)。本設計文件只保留架構不變的原則；任何改變 trust boundary、authority、retrieval contract、retention 或 deployment threat model 的 backlog item，都必須先補 ADR 與 rollback plan。
 
 ## 附錄 A:Item type 慣例
 

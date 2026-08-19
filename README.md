@@ -7,7 +7,8 @@
 一般使用者的查看、審核與記憶遷移說明見
 [docs/USER-GUIDE.md](docs/USER-GUIDE.md)；可直接交給 AI agent 的操作與既有記憶
 遷移說明見 [docs/AGENT-GUIDE.md](docs/AGENT-GUIDE.md)。完整設計見
-[docs/DESIGN.md](docs/DESIGN.md);信任邊界與資料治理見
+[docs/DESIGN.md](docs/DESIGN.md)；未來功能與平台工作排序見
+[docs/BACKLOG.md](docs/BACKLOG.md)；信任邊界與資料治理見
 [docs/ADR-001](docs/ADR-001-trust-boundary.md)；Context／Memory 分層決策見
 [docs/ADR-002](docs/ADR-002-context-memory-separation.md)；v6 混合查找決策見
 [docs/ADR-003](docs/ADR-003-hybrid-memory-retrieval.md)。
