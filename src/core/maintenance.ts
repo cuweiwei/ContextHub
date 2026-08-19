@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import Database from 'better-sqlite3';
@@ -321,7 +322,10 @@ export function restoreDrill(manifestFile: string, dataDir: string): Maintenance
   try {
     const verified = verifyBackupManifest(manifestFile);
     checks.push({ name: 'manifest_checksum', status: 'pass' });
-    workDir = fs.mkdtempSync(path.join(path.dirname(manifestFile), '.restore-drill-'));
+    // The manifest/snapshot may be mounted read-only by the upgrade gate.
+    // Keep all working files in the OS temp directory so the drill never
+    // needs write access to the snapshot mount.
+    workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'contexthub-restore-drill-'));
     const copy = path.join(workDir, 'restore.db');
     fs.copyFileSync(verified.snapshotFile, copy, fs.constants.COPYFILE_EXCL);
     db = openDatabase(copy, { synchronous: 'FULL' });
