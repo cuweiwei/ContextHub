@@ -28,6 +28,7 @@ export function createControlCommands(deps: ControlDeps) {
   function createAgent(actor: ControlActor, input: {
     id: string; name: string; namespace: string; principalKind: PrincipalKind;
     scopes: Scope[]; maxSensitivity?: Sensitivity; readSources?: string[] | null; profile?: GrantProfile;
+    authMethod?: ClientInfo['auth_method'];
   }) {
     assertAdmin(actor);
     const created = deps.clientsRepo.create(input);
@@ -68,6 +69,17 @@ export function createControlCommands(deps: ControlDeps) {
     return result;
   }
 
+  function reEnroll(actor: ControlActor, clientId: string) {
+    assertAdmin(actor);
+    const target = deps.clientsRepo.get(clientId);
+    if (!target) throw new Error(`no client with id "${clientId}"`);
+    if (target.principal_kind === 'human') throw new Error('enrollment is for agent/service clients');
+    deps.enrollmentsRepo.revokePendingForClient(clientId);
+    const result = deps.enrollmentsRepo.create(clientId, actor.principal.id);
+    deps.auditRepo.log({ namespace: target.namespace, clientId: auditActor(actor), action: 'control.agent.reenroll', outcome: 'allow', details: { target: clientId, enrollment_id: result.id } });
+    return result;
+  }
+
   function revokeEnrollment(actor: ControlActor, id: string): boolean {
     assertAdmin(actor);
     const ok = deps.enrollmentsRepo.revoke(id);
@@ -94,7 +106,7 @@ export function createControlCommands(deps: ControlDeps) {
     return result;
   }
 
-  return { createAgent, setAgentDisabled, createEnrollment, revokeEnrollment, linkClient, exchangeEnrollment };
+  return { createAgent, setAgentDisabled, createEnrollment, reEnroll, revokeEnrollment, linkClient, exchangeEnrollment };
 }
 
 export type ControlCommands = ReturnType<typeof createControlCommands>;

@@ -6,6 +6,15 @@ export const isoDateTime = z
   .refine((s) => !Number.isNaN(Date.parse(s)), { message: 'invalid ISO 8601 datetime' })
   .transform((s) => new Date(s).toISOString());
 
+const safeSourceUri = z.string().max(1000).refine((value) => {
+  try {
+    const protocol = new URL(value).protocol;
+    return protocol === 'https:' || protocol === 'http:';
+  } catch {
+    return false;
+  }
+}, { message: 'source_uri must use http or https' });
+
 export const SENSITIVITIES = ['normal', 'private'] as const;
 export type Sensitivity = (typeof SENSITIVITIES)[number];
 
@@ -106,7 +115,7 @@ export const newItemSchema = z.object({
    */
   source_item_id: z.string().min(1).max(200).optional(),
   /** Deep link back to the source of truth in the origin app. */
-  source_uri: z.string().max(1000).optional(),
+  source_uri: safeSourceUri.optional(),
   /**
    * REQUIRED on every create: AI agents retry on timeouts, and a system of
    * record must make retries safe. Same key + same payload replays the
@@ -138,7 +147,7 @@ export const patchItemSchema = z
     valid_until: isoDateTime.nullable(),
     last_verified_at: isoDateTime.nullable(),
     decay_policy: z.enum(DECAY_POLICIES).nullable(),
-    source_uri: z.string().max(1000).nullable(),
+    source_uri: safeSourceUri.nullable(),
     expected_revision: z.number().int().min(1),
   })
   .partial();
@@ -207,6 +216,8 @@ export interface CompactItem {
 }
 
 export type SensitivityFilter = 'normal' | 'private' | 'all';
+export type ValidityFilter = 'current' | 'scheduled' | 'expired' | 'all';
+export type EnrollmentStatus = 'pending' | 'consumed' | 'expired' | 'revoked' | 'locked';
 
 /**
  * Which trust slice a read surface exposes. Fixed per route/tool by server
@@ -233,6 +244,8 @@ export interface ListFilters {
   since?: string;
   until?: string;
   sensitivity?: SensitivityFilter;
+  validity?: ValidityFilter;
+  trust_states?: TrustState[];
 }
 
 export const SCOPES = ['read', 'write', 'review_insight', 'admin'] as const;
