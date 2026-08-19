@@ -37,7 +37,7 @@ jobs:
       - name: Retrieval regression gate
         run: npm run benchmark:retrieval -- --items=2000
       - name: Install Chromium only
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install chromium
       - name: Browser smoke
         run: npm run test:browser
       - name: Docker build smoke
