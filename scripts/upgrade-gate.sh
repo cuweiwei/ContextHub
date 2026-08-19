@@ -24,6 +24,7 @@ docker run --rm \
   --read-only \
   -e DATA_DIR=/gate-data \
   --tmpfs /gate-data:rw,noexec,nosuid,size=256m \
+  --tmpfs /tmp:rw,noexec,nosuid,size=256m \
   -v "$SNAP_DIR:/gate-snapshot:ro" \
   "$IMAGE" node dist/cli.js restore-drill --snapshot "/gate-snapshot/$SNAP_NAME" --json
 echo "upgrade gate passed; candidate was not started"
