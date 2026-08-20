@@ -48,6 +48,10 @@ curl -k https://<nas-tailscale-name>:8443/health
 使用同一個 cookie session 造訪 `/auth/login` 後，`/dashboard` 應回傳 200，
 `/v1/control/me` 應回傳已註冊 principal 與 linked human client。
 
+管理介面依工作流分為總覽、記憶庫、審核佇列、連線、命名空間、治理政策、稽核軌跡、
+記憶效益與安全／維運；功能盤點、資訊架構與刻意保留在 CLI 的 break-glass 操作見
+[CONTROL-CENTER-UX.md](CONTROL-CENTER-UX.md)。
+
 ## Staged enable
 
 先部署 code，確認 `/health`、legacy REST、MCP、`/explore`、`/review`；再配置 8443 HTTPS

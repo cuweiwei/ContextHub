@@ -48,8 +48,17 @@ describe('Control Center web auth and enrollment', () => {
     const page = await app.inject({ method: 'GET', url: '/memories', headers: { cookie } });
     expect(page.statusCode).toBe(200);
     expect(page.headers['content-security-policy']).toContain("script-src 'self'");
+    expect(page.body).toContain('class="app-shell"');
+    expect(page.body).toContain('type="module" src="/assets/control-center.js"');
+    expect(page.body).toContain('id="namespace-selector"');
     expect(page.body).not.toMatch(/chk_[A-Za-z0-9_-]{20,}/);
     expect(page.body).not.toContain('ADMIN_TOKEN');
+    const script = await app.inject({ method: 'GET', url: '/assets/control-center.js' });
+    expect(script.statusCode).toBe(200);
+    expect(script.headers['content-type']).toContain('text/javascript');
+    expect(script.body).toContain("from './components.js'");
+    const effectivenessPage = await app.inject({ method: 'GET', url: '/effectiveness', headers: { cookie } });
+    expect(effectivenessPage.statusCode).toBe(200);
     const logout = await app.inject({ method: 'POST', url: '/auth/logout', headers: { cookie, origin: 'https://hub.test', 'content-type': 'application/json', 'x-csrf-token': (await app.inject({ method: 'GET', url: '/v1/control/me', headers: { cookie } })).json().csrf_token }, payload: {} });
     expect(logout.statusCode).toBe(204);
     expect((await app.inject({ method: 'GET', url: '/v1/control/me', headers: { cookie } })).statusCode).toBe(401);

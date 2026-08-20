@@ -1,107 +1,124 @@
-import type { FastifyInstance } from 'fastify';
+import { readFileSync } from 'node:fs';
+import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { AppDeps } from './server.js';
 
-const CSS = `
-:root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans TC",sans-serif;color:#edf6f2;background:#09100f;--panel:#11201d;--line:#29413d;--muted:#9ab0aa;--mint:#70e0b4;--amber:#f4bd68;--red:#ff8e86}*{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(circle at 10% 0%,#1c604533,transparent 35rem),#09100f}button,input,select,textarea{font:inherit}button{cursor:pointer}.shell{width:min(1440px,100%);margin:auto;padding:24px}.top{display:flex;justify-content:space-between;align-items:flex-start;gap:18px;margin-bottom:22px}.eyebrow{color:var(--mint);font-size:12px;letter-spacing:.14em;text-transform:uppercase;font-weight:800}.top h1{font-size:clamp(26px,4vw,42px);margin:7px 0 8px;letter-spacing:-.04em}.lede{color:var(--muted);margin:0;line-height:1.55}.identity{border:1px solid var(--line);border-radius:999px;padding:10px 14px;color:var(--muted);font-size:12px;white-space:nowrap}.identity b{color:var(--mint)}nav{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:18px}nav a,.button{border:1px solid var(--line);border-radius:10px;padding:9px 12px;color:var(--muted);background:#0d1917;text-decoration:none}.button.primary{background:var(--mint);color:#07110e;border-color:transparent;font-weight:800}.button.danger{color:var(--red);border-color:#ff8e8655}.card{background:#11201de8;border:1px solid var(--line);border-radius:16px;padding:18px;margin-bottom:16px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}.metric{padding:16px;border:1px solid var(--line);border-radius:12px;background:#0d1917}.metric strong{display:block;font-size:28px;color:var(--mint);margin-top:8px}.muted{color:var(--muted)}.badge{display:inline-flex;border:1px solid var(--line);border-radius:999px;padding:3px 8px;font-size:11px;margin:2px;color:var(--amber)}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:11px 8px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--muted);font-size:12px;font-weight:600}.pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0b1513;border:1px solid var(--line);border-radius:10px;padding:14px;line-height:1.6}.toolbar{display:flex;gap:9px;flex-wrap:wrap;margin-bottom:12px}input,select,textarea{color:#edf6f2;background:#0b1513;border:1px solid var(--line);border-radius:9px;padding:9px 11px}input:focus,select:focus,textarea:focus{outline:2px solid #39b98a66;border-color:var(--mint)}.status{min-height:24px;color:var(--muted);margin:8px 0}.status.bad{color:var(--red)}.row-actions{display:flex;gap:7px;flex-wrap:wrap}.empty{text-align:center;color:var(--muted);padding:40px}.namespace{color:var(--mint);font-weight:800}.work{color:var(--amber)}.detail{display:grid;grid-template-columns:minmax(0,1fr) minmax(260px,360px);gap:16px}.confirm{color:var(--muted);font-size:12px}@media(max-width:760px){.shell{padding:16px}.top{display:block}.identity{display:inline-block;margin-top:14px}.detail{grid-template-columns:1fr}table{display:block;overflow:auto;white-space:nowrap}}
-`;
+const CSS = readFileSync(new URL('../../public/assets/control-center.css', import.meta.url), 'utf8');
+const JS = readFileSync(new URL('../../public/assets/control-center.js', import.meta.url), 'utf8');
+const COMPONENTS_JS = readFileSync(new URL('../../public/assets/components.js', import.meta.url), 'utf8');
+const NAMESPACE_JS = readFileSync(new URL('../../public/assets/namespace-selector.mjs', import.meta.url), 'utf8');
 
-const JS = String.raw`(() => {
-  let me = null;
-  let csrf = '';
-  const $ = (s, root = document) => root.querySelector(s);
-  const esc = (value) => String(value ?? '');
-  const el = (tag, textValue, cls) => { const n = document.createElement(tag); if (textValue !== undefined) n.textContent = textValue; if (cls) n.className = cls; return n; };
-  const status = (message, bad = false) => { const n = $('#status'); if (n) { n.textContent = message || ''; n.className = 'status' + (bad ? ' bad' : ''); } };
-  async function api(path, options = {}) { const headers = Object.assign({}, options.headers || {}); if (options.body !== undefined) headers['Content-Type'] = 'application/json'; if (csrf) headers['X-CSRF-Token'] = csrf; const r = await fetch(path, Object.assign({}, options, { headers })); const b = r.status === 204 ? null : await r.json().catch(() => null); if (!r.ok) throw new Error(b?.error?.message || ('HTTP ' + r.status)); return b; }
-  function table(headers, rows) { const t = el('table'); const h = el('thead'); const hr = el('tr'); headers.forEach(x => hr.append(el('th', x))); h.append(hr); t.append(h); const body = el('tbody'); rows.forEach(cells => { const tr = el('tr'); cells.forEach(cell => { const td = el('td'); if (cell instanceof Node) td.append(cell); else td.textContent = esc(cell); tr.append(td); }); body.append(tr); }); t.append(body); return t; }
-  function nav() { const n = $('nav'); ['/dashboard','/memories','/review','/agents','/namespaces','/policies','/audit','/settings'].forEach(p => { const a = el('a', p.slice(1) || 'dashboard'); a.href = p; n.append(a); }); }
-  function renderHeader() { const ident = $('.identity'); ident.replaceChildren(el('span', me.principal.displayName + ' · '), el('b', me.principal.subject)); }
-  async function dashboard(root) { const ns = me.linked_clients[0]?.namespace; const d = await api('/v1/control/dashboard' + (ns ? '?namespace=' + encodeURIComponent(ns) : '')); root.append(el('h2', 'Dashboard')); const grid = el('div','', 'grid'); [['Namespace', d.namespace],['Pending candidates', d.candidates],['Visible item sample', d.item_sample_total],['Managed agents', d.agents.length]].forEach(([k,v]) => { const m=el('div','', 'metric'); m.append(el('span',k,'muted'),el('strong',v)); grid.append(m); }); root.append(grid); const card=el('section','', 'card'); card.append(el('h3','Agents status')); card.append(table(['Agent','Namespace','Status','Credential','Last activity'], d.agents.map(a => [a.name, a.namespace, a.disabled ? 'credential_disabled' : (a.activity?.last_tool_call_at ? 'recently_active' : 'never_connected'), a.auth_method || 'legacy_key', a.activity?.last_tool_call_at || '—']))); root.append(card); }
-  async function memories(root) { const card=el('section','', 'card'); const bar=el('div','', 'toolbar'); const q=el('input'); q.placeholder='搜尋記憶'; const btn=el('button','搜尋','button primary'); bar.append(q,btn); const list=el('div'); card.append(el('h2','Memories'),bar,list); root.append(card); async function load(){ list.replaceChildren(); const d=await api('/v1/control/memories?q='+encodeURIComponent(q.value)); const items=d.items || d.fullItems || []; if(!items.length){list.append(el('div','沒有符合的 accepted 記憶','empty'));return} list.append(table(['標題','類型','Trust','來源','內容'],items.map(i=>[i.title,i.type,i.trust_state,i.source,i.snippet || i.content || '']))); } btn.addEventListener('click',()=>load().catch(e=>status(e.message,true))); await load(); }
-  async function review(root) { const d=await api('/v1/control/review/candidates'); root.append(el('h2','Review · Candidate inbox')); const list=el('div'); root.append(list); if(!d.items.length){list.append(el('div','目前沒有待審提案','empty'));return} d.items.forEach(item=>{const card=el('section','', 'card'); card.append(el('h3',item.title),el('div',item.content || item.snippet || '', 'pre'),el('p','來源：'+item.source+' · revision '+item.revision,'muted')); const note=el('textarea');note.placeholder='審核註記'; const actions=el('div','', 'row-actions'); ['accept','reject','revoke'].forEach(dec=>{const b=el('button',dec,dec==='reject'?'button danger':'button primary'); b.addEventListener('click',async()=>{try{await api('/v1/control/review/items/'+encodeURIComponent(item.id),{method:'POST',body:JSON.stringify({decision:dec,expected_revision:item.revision,note:note.value,idempotency_key:crypto.randomUUID(),namespace:d.namespace})}); card.remove(); status('已完成 '+dec);}catch(e){status(e.message,true)}});actions.append(b)});card.append(note,actions);list.append(card)}); }
-  async function agents(root) { const d=await api('/v1/control/agents'); root.append(el('h2','Agents')); const card=el('section','', 'card'); const form=el('form'); const fields=[['id','client id'],['name','display name'],['namespace','namespace']]; fields.forEach(([name,ph])=>{const i=el('input');i.name=name;i.placeholder=ph;i.required=true;form.append(i)}); const profile=el('select'); ['none','agent-default','app-producer','reviewer'].forEach(x=>profile.append(el('option',x)));profile.name='profile'; const submit=el('button','新增 Agent（產生 enrollment）','button primary'); submit.type='submit';form.append(profile,submit); const formStatus=el('div','', 'status');form.append(formStatus);form.addEventListener('submit',async e=>{e.preventDefault();const data=Object.fromEntries(new FormData(form));data.principal_kind='agent';data.scopes=['read','write'];data.profile=data.profile;data.auth_method='enrollment_key';try{const result=await api('/v1/control/agents',{method:'POST',body:JSON.stringify(data)});formStatus.textContent='已建立 '+result.client.id+'；enrollment code 只在此回應出現一次，請交給 agent helper。';form.reset();}catch(err){formStatus.textContent=err.message;formStatus.className='status bad'}});card.append(form);root.append(card); const rows=d.agents.map(a=>{const actions=el('div','', 'row-actions'); const b=el('button',a.disabled?'啟用':'停用',a.disabled?'button primary':'button danger');b.addEventListener('click',async()=>{try{await api('/v1/control/agents/'+a.id+'/'+(a.disabled?'enable':'disable'),{method:'POST',body:JSON.stringify({confirm_id:a.id})});location.reload()}catch(e){status(e.message,true)}});actions.append(b);return[a.name,a.id,a.namespace,a.auth_method||'legacy_key',a.disabled?'disabled':'enabled',actions]});root.append(el('section','', 'card'),table(['Name','Client ID','Namespace','Auth','Status','Action'],rows)); }
-  async function simple(root, title, endpoint, key) { const d=await api(endpoint); root.append(el('h2',title)); const card=el('section','', 'card'); card.append(el('pre',JSON.stringify(d[key] ?? d,null,2),'pre')); root.append(card); }
-  async function boot(){ nav(); try { me=await api('/v1/control/me'); csrf=me.csrf_token; renderHeader(); const root=$('#content'); const path=location.pathname; if(path==='/dashboard'||path==='/')await dashboard(root); else if(path==='/memories')await memories(root); else if(path==='/review')await review(root); else if(path==='/agents')await agents(root); else if(path==='/namespaces')await simple(root,'Namespaces','/v1/control/namespaces','namespaces'); else if(path==='/policies')await simple(root,'Policies','/v1/control/policies/'+encodeURIComponent(me.linked_clients[0]?.namespace || 'personal'),'rules'); else if(path==='/audit')await simple(root,'Audit','/v1/control/audit','entries'); else await simple(root,'Settings','/v1/control/settings',''); } catch(e) { if(String(e.message).includes('Sign in')) location.href='/auth/login?return_to='+encodeURIComponent(location.pathname); else status(e.message,true); } }
-  boot();
-})();`;
+const HTML = `<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#12243c">
+  <title>ContextHub Control Center</title>
+  <link rel="stylesheet" href="/assets/control-center.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar" aria-label="主要導覽">
+      <a class="brand" href="/dashboard" aria-label="ContextHub 總覽">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span><strong>ContextHub</strong><small>Control Center</small></span>
+      </a>
+      <nav id="primary-nav" class="primary-nav"></nav>
+      <div class="trust-note">
+        <span class="status-dot good" aria-hidden="true"></span>
+        <span><strong>Private control plane</strong><small>Tailscale identity · no browser keys</small></span>
+      </div>
+    </aside>
 
-const NAMESPACE_JS = String.raw`(() => {
-  const select = document.querySelector('#namespace-selector');
-  if (!select) return;
-  const originalFetch = window.fetch.bind(window);
-  window.fetch = (input, init) => {
-    const raw = typeof input === 'string' ? input : input.url;
-    if (raw.startsWith('/v1/control/') && !raw.includes('namespace=') && !raw.endsWith('/me')) {
-      const url = new URL(raw, location.origin); const current = new URLSearchParams(location.search).get('namespace'); if (current) url.searchParams.set('namespace', current);
-      return originalFetch(url, init);
-    }
-    return originalFetch(input, init);
-  };
-  fetch('/v1/control/me', { credentials: 'same-origin', cache: 'no-store' }).then((response) => response.json()).then((me) => {
-    const namespaces = [...new Set((me.linked_clients || []).map((client) => client.namespace))];
-    const selected = new URLSearchParams(location.search).get('namespace') || namespaces[0] || '';
-    select.replaceChildren(...namespaces.map((namespace) => { const option = document.createElement('option'); option.value = namespace; option.textContent = namespace; option.selected = namespace === selected; return option; }));
-    select.addEventListener('change', () => { const url = new URL(location.href); url.searchParams.set('namespace', select.value); location.assign(url); });
-  }).catch(() => { select.replaceChildren(); });
-})();`;
+    <div class="workspace">
+      <header class="topbar">
+        <div class="topbar-start">
+          <button class="icon-button mobile-menu" id="menu-toggle" type="button" aria-label="開啟導覽" aria-controls="sidebar" aria-expanded="false">☰</button>
+          <div class="breadcrumb"><span>Control Center</span><b id="current-section">總覽</b></div>
+        </div>
+        <div class="topbar-actions">
+          <label class="namespace-control" for="namespace-selector">
+            <span>目前空間</span>
+            <select id="namespace-selector" aria-label="選擇命名空間"></select>
+          </label>
+          <button class="identity-button" id="identity-button" type="button" aria-label="目前登入身分">
+            <span class="avatar" aria-hidden="true">…</span>
+            <span class="identity-copy"><strong>正在驗證</strong><small>請稍候</small></span>
+          </button>
+        </div>
+      </header>
 
-const ENROLLMENT_MODAL_JS = String.raw`(() => {
-  const modal = document.querySelector('#enrollment-secret-modal');
-  if (!modal) return;
-  const code = modal.querySelector('[data-enrollment-code]');
-  const countdown = modal.querySelector('[data-enrollment-countdown]');
-  const close = modal.querySelector('[data-enrollment-close]');
-  const copy = modal.querySelector('[data-enrollment-copy]');
-  let timer;
-  const clearSecret = () => { clearInterval(timer); timer = undefined; code.textContent = ''; countdown.textContent = ''; modal.close(); };
-  close.addEventListener('click', clearSecret);
-  modal.addEventListener('cancel', (event) => { event.preventDefault(); clearSecret(); });
-  copy.addEventListener('click', async () => { if (code.textContent) await navigator.clipboard.writeText(code.textContent); });
-  const originalFetch = window.fetch.bind(window);
-  window.fetch = async (input, init) => {
-    const response = await originalFetch(input, init);
-    const raw = typeof input === 'string' ? input : input.url;
-    if ((raw.endsWith('/v1/control/agents') || raw.includes('/enrollments')) && init?.method === 'POST' && response.ok) {
-      const body = await response.clone().json().catch(() => null);
-      const secret = body?.enrollment?.code || body?.code;
-      if (secret && !body?.replayed) {
-        code.textContent = secret;
-        const expires = Date.parse(body.enrollment?.expiresAt || body.expiresAt || '') || (Date.now() + 600000);
-        const tick = () => { countdown.textContent = Math.max(0, Math.ceil((expires - Date.now()) / 1000)) + ' 秒後到期'; };
-        tick(); timer = setInterval(tick, 1000); modal.showModal();
-      }
-    }
-    return response;
-  };
-})();`;
+      <main class="content-shell">
+        <div id="status" class="toast" role="status" aria-live="polite"></div>
+        <section id="content" class="page" aria-live="polite" aria-busy="true"></section>
+      </main>
+    </div>
+  </div>
 
-const SESSION_MANAGEMENT_JS = String.raw`(() => {
-  if (!location.pathname.endsWith('/settings')) return;
-  const mount = () => document.querySelector('#content');
-  Promise.all([fetch('/v1/control/me', { credentials: 'same-origin', cache: 'no-store' }).then((r) => r.json()), fetch('/v1/control/sessions', { credentials: 'same-origin', cache: 'no-store' }).then((r) => r.json())]).then(([me, data]) => {
-    const root = mount(); if (!root) return;
-    const card = document.createElement('section'); card.className = 'card'; const title = document.createElement('h2'); title.textContent = 'Sessions'; card.append(title);
-    for (const session of data.sessions || []) { const row = document.createElement('div'); row.className = 'row-actions'; const label = document.createElement('span'); label.textContent = session.id + ' · idle ' + session.idle_expires_at + ' · absolute ' + session.absolute_expires_at; row.append(label); if (!session.revoked_at && session.id !== me.session.id) { const button = document.createElement('button'); button.type = 'button'; button.textContent = 'Revoke'; button.addEventListener('click', async () => { await fetch('/v1/control/sessions/' + encodeURIComponent(session.id) + '/revoke', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': me.csrf_token }, body: '{}' }); row.remove(); }); row.append(button); } card.append(row); }
-    root.append(card);
-  }).catch(() => {});
-})();`;
+  <dialog id="detail-dialog" class="sheet-dialog" aria-labelledby="detail-dialog-title">
+    <div class="dialog-toolbar">
+      <div><span class="section-kicker">DETAIL</span><h2 id="detail-dialog-title">詳細資料</h2></div>
+      <button class="icon-button" type="button" data-dialog-close aria-label="關閉">×</button>
+    </div>
+    <div id="detail-dialog-content" class="dialog-content"></div>
+  </dialog>
 
-const HTML = `<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ContextHub Control Center</title><link rel="stylesheet" href="/assets/control-center.css"></head><body><main class="shell"><header class="top"><div><div class="eyebrow">ContextHub · private control plane</div><h1>Control Center</h1><p class="lede">在 Tailscale 私網中管理記憶、Agent、審核與連線狀態。Control admin 不會自動取得任何 namespace 的 Memory 讀取權。</p></div><div class="identity">Loading identity…</div></header><label for="namespace-selector" class="muted">Namespace</label><select id="namespace-selector" aria-label="Namespace selector"></select><nav aria-label="Control Center navigation"></nav><div id="status" class="status" role="status"></div><section id="content" aria-live="polite"></section><dialog id="enrollment-secret-modal" aria-labelledby="enrollment-secret-title"><h2 id="enrollment-secret-title">Enrollment code（只顯示一次）</h2><code data-enrollment-code></code><p data-enrollment-countdown></p><button type="button" data-enrollment-copy>Copy</button><button type="button" data-enrollment-close>Close</button></dialog></main><script src="/assets/namespace-selector.js" defer></script><script src="/assets/enrollment-modal.js" defer></script><script src="/assets/session-management.js" defer></script><script src="/assets/control-center.js" defer></script></body></html>`;
+  <dialog id="enrollment-secret-modal" class="modal" aria-labelledby="enrollment-secret-title">
+    <button class="icon-button modal-close" type="button" data-enrollment-close aria-label="關閉">×</button>
+    <span class="secret-icon" aria-hidden="true">1×</span>
+    <h2 id="enrollment-secret-title">Enrollment code 只顯示一次</h2>
+    <p class="muted">請立即交給受信任的 Agent helper。關閉後，ContextHub 不會再次顯示這組 code。</p>
+    <code class="secret-code" data-enrollment-code></code>
+    <p class="countdown" data-enrollment-countdown></p>
+    <div class="dialog-actions">
+      <button class="button secondary" type="button" data-enrollment-copy>複製 code</button>
+      <button class="button primary" type="button" data-enrollment-close>我已安全保存</button>
+    </div>
+  </dialog>
+
+  <div class="sidebar-scrim" id="sidebar-scrim" hidden></div>
+  <script type="module" src="/assets/control-center.js"></script>
+</body>
+</html>`;
+
+const UI_PATHS = [
+  '/',
+  '/dashboard',
+  '/memories',
+  '/review',
+  '/agents',
+  '/namespaces',
+  '/policies',
+  '/audit',
+  '/effectiveness',
+  '/settings',
+];
 
 export function registerControlUiRoutes(app: FastifyInstance, deps: AppDeps): void {
   const enabled = () => deps.config.controlCenterEnabled;
   if (!enabled()) return;
-  app.get('/assets/control-center.css', async (_req, reply) => reply.header('Content-Type','text/css; charset=utf-8').header('Cache-Control','public, max-age=300').send(CSS));
-  app.get('/assets/control-center.js', async (_req, reply) => reply.header('Content-Type','text/javascript; charset=utf-8').header('Cache-Control','public, max-age=300').send(JS));
-  app.get('/assets/namespace-selector.js', async (_req, reply) => reply.header('Content-Type','text/javascript; charset=utf-8').header('Cache-Control','public, max-age=300').send(NAMESPACE_JS));
-  app.get('/assets/enrollment-modal.js', async (_req, reply) => reply.header('Content-Type','text/javascript; charset=utf-8').header('Cache-Control','public, max-age=300').send(ENROLLMENT_MODAL_JS));
-  app.get('/assets/session-management.js', async (_req, reply) => reply.header('Content-Type','text/javascript; charset=utf-8').header('Cache-Control','public, max-age=300').send(SESSION_MANAGEMENT_JS));
+
+  const asset = (mime: string, body: string) => async (_req: unknown, reply: FastifyReply) =>
+    reply.header('Content-Type', mime).header('Cache-Control', 'public, max-age=300').send(body);
+
+  app.get('/assets/control-center.css', asset('text/css; charset=utf-8', CSS));
+  app.get('/assets/control-center.js', asset('text/javascript; charset=utf-8', JS));
+  app.get('/assets/components.js', asset('text/javascript; charset=utf-8', COMPONENTS_JS));
+  app.get('/assets/namespace-selector.mjs', asset('text/javascript; charset=utf-8', NAMESPACE_JS));
   app.get('/explore', async (_req, reply) => reply.redirect('/memories'));
-  for (const path of ['/','/dashboard','/memories','/review','/agents','/namespaces','/policies','/audit','/settings']) {
+
+  for (const path of UI_PATHS) {
     app.get(path, async (req, reply) => {
       if (!enabled()) return reply.code(404).send({ error: { code: 'feature_disabled', message: 'Control Center is disabled' } });
       if (!req.controlSession) return reply.redirect('/auth/login?return_to=' + encodeURIComponent(req.url.split('?')[0] ?? '/dashboard'));
-      return reply.header('Content-Type','text/html; charset=utf-8').header('Cache-Control','no-store').header('Content-Security-Policy',"default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'").header('X-Content-Type-Options','nosniff').header('Referrer-Policy','no-referrer').send(HTML);
+      return reply
+        .header('Content-Type', 'text/html; charset=utf-8')
+        .header('Cache-Control', 'no-store')
+        .header('Content-Security-Policy', "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+        .header('X-Content-Type-Options', 'nosniff')
+        .header('Referrer-Policy', 'no-referrer')
+        .send(HTML);
     });
   }
 }

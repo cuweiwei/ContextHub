@@ -154,7 +154,7 @@ Codex 的安全設定、personal/work credential 隔離與 smoke test 見
 
 ## Control Center（Tailscale HTTPS）
 
-Control Center 是 feature-flagged 的人類管理平面：`/dashboard`、`/memories`、`/review`、`/agents`、`/namespaces`、`/policies`、`/audit`、`/settings`。它使用 Tailscale Serve 的 identity headers 建立短期、可撤銷的 `HttpOnly; Secure; SameSite=Strict` session；瀏覽器不保存 reviewer key，也不會取得 `ADMIN_TOKEN`。Control admin 與 namespace-scoped human reviewer 是分離的，沒有 linked human client 就不能讀 Memory。
+Control Center 是 feature-flagged 的人類管理平面：`/dashboard`、`/memories`、`/review`、`/agents`、`/namespaces`、`/policies`、`/audit`、`/effectiveness`、`/settings`。介面依管理者工作流整合總覽、hybrid search／facets、記憶版本與 successor、批次審核、Agent credential lifecycle、政策驗證／模擬／回復、outcome 效益與 Doctor／session 維運；完整資訊架構見 [Control Center UX](docs/CONTROL-CENTER-UX.md)。它使用 Tailscale Serve 的 identity headers 建立短期、可撤銷的 `HttpOnly; Secure; SameSite=Strict` session；瀏覽器不保存 reviewer key，也不會取得 `ADMIN_TOKEN`。Control admin 與 namespace-scoped human reviewer 是分離的，沒有 linked human client 就不能讀 Memory。
 
 先在 NAS 以 CLI bootstrap：
 
