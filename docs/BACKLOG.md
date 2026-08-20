@@ -4,7 +4,7 @@
 
 ## Evidence model
 
-截至 2026-08-20，`0.9.0@4c3a09a35348cc319316226a1c0691bf1d7cfad5` 是最新已驗證 release snapshot：[main CI run 32324323535](https://github.com/cuweiwei/ContextHub/actions/runs/32324323535) 已通過 core、E2E、retrieval、browser、dependency／image scan，並產出 SBOM、provenance 與 `ReleaseManifestV1`；GHCR digest `sha256:eb682cdd47e92c5569e0e9a58b4ea795c0687d4c6aeea1fc2a179163b2abd3af` 可讀取且 attestation 驗證通過。Production 的 8788／8443 `/health` 已回報相同 version／commit、schema 14、audit writable 與 projection ready；但 GitHub `production` environment、正式 deploy workflow run、digest-to-running-image 證據與完整 `DeploymentEvidenceV1` 仍缺，所以尚不符合完整 `live_verified`。
+截至 2026-08-20，`0.9.0@3ef8f8ce40a7d2746de31b44b00562d56e38fe20` 是最新已驗證且部署的 release snapshot：[main CI run 32332161336](https://github.com/cuweiwei/ContextHub/actions/runs/32332161336) 已通過 core、E2E、retrieval、browser、dependency／image scan，並產出 SBOM、provenance 與 `ReleaseManifestV1`；GHCR digest `sha256:a0517f05990a2419269bb210fd7c9bd23dc666242c9413f53fc0084114f49e45` 的 attestation 驗證通過。Owner 以 root-owned NAS deploy engine 部署該精確 digest；8788／8443 `/health` 回報相同 version／commit、schema 15、audit writable 與 projection ready，retrieval 37/37，backup manifest、isolated restore drill、doctor、rollback image 與 `DEPLOYMENT VERIFIED` evidence 均已產生，因此此 release 達到 `live_verified`。GitHub `production` environment 與自動 deploy workflow 的外部設定仍未完成，故自動部署路徑仍是 pending；也不能由 live health 反推真實 Codex／Claude／Hermes product client 已 `provider_verified`。
 
 功能狀態與證據分開記錄：
 
@@ -17,11 +17,11 @@
 
 ## P0 — 發布、部署與資料恢復可信化（0–2 個月）
 
-1. **CHB-029｜Backlog 與證據重新對帳｜S｜implemented_local**：本文件、release snapshot、CI／registry 證據與 production health 觀察已對帳；尚未完成的 provider／deployment 證據仍明確保持 pending，P3 保持不變。
+1. **CHB-029｜Backlog 與證據重新對帳｜S｜done**：本文件已對帳 `3ef8f8c` 的 CI／registry／deployment evidence；自動部署 provider 設定與真實 agent client smoke 仍明確保持 pending，P3 保持不變。
 2. **CHB-030｜保護 main 與重整 CI｜M｜implemented_local / provider_verified pending / live_verified pending**：repo 已有 PR/main CI、required `verify` 聚合、SHA pin、ShellCheck、Dependabot 與 image CVE gate；GitHub ruleset 尚未由本次本機變更套用。
-3. **CHB-031｜不可變 Container Release｜M｜implemented_local / provider_verified / live_verified pending**：main CI 已實際產出公開 GHCR `linux/amd64` digest、SBOM、provenance attestation 與 `ReleaseManifestV1`；registry digest 與 GitHub attestation 均已驗證。尚未有正式 NAS deployment evidence。
-4. **CHB-032｜Owner 核准後自動部署 NAS｜L｜implemented_local / provider_verified pending / live_verified pending**：workflow、Tailscale OIDC、受限 SSH wrapper、root dispatcher 與 digest `nas-deploy.sh` 已完成；GitHub environment、Tailscale ACL/identity、NAS key/wrapper 尚未套用。
-5. **CHB-033｜0.9.0 首次正式部署與 live acceptance｜M｜blocked（health observed，formal acceptance pending）**：8788／8443 health 已觀察到 `0.9.0@4c3a09a`，但不能由 health 反推 running image digest、restore drill、doctor 或 rollback evidence。待 CHB-030／032 的 GitHub ruleset、production environment、Tailscale／SSH 邊界完成後，以精確 digest 執行正式 workflow，取得 REST／MCP、Control Center、reindex、restore drill、doctor 與 `DEPLOYMENT VERIFIED` 證據。
+3. **CHB-031｜不可變 Container Release｜M｜implemented_local / provider_verified / live_verified**：main CI 已產出並驗證公開 GHCR `linux/amd64` digest、SBOM、provenance attestation 與 `ReleaseManifestV1`；相同 digest 已由 NAS deployment evidence 證明為 running release。
+4. **CHB-032｜Owner 核准後自動部署 NAS｜L｜implemented_local / manual path live_verified / automated provider pending**：root-owned deploy engine 與 immutable digest `nas-deploy.sh` 已在 owner SSH/sudo 授權下實際通過；GitHub `production` environment、Tailscale workload identity/ACL、forced-command deploy key 與 dispatcher 仍未套用，所以 GitHub Actions 自動部署尚未 `provider_verified`。
+5. **CHB-033｜0.9.0 首次正式部署與 live acceptance｜M｜done / live_verified**：`0.9.0@3ef8f8c` 已以精確 digest 部署；8788／8443 health、schema 15、37/37 reindex、verified backup、isolated restore drill、doctor、rollback image 與 `DEPLOYMENT VERIFIED` 均匹配同一 deployment evidence。這證明 release live acceptance，不等於 CHB-032 的 GitHub 自動部署已完成。
 6. **CHB-034｜維運排程與失敗告警｜M｜implemented_local foundation / provider_verified pending / live_verified pending**：`scripts/nas-maintenance.sh`、維運 records、doctor、backup/restore/GC 與 metadata-only notification retry/dead-letter 測試已在本機；Synology tasks 與 Telegram 仍待唯讀盤點和 owner 啟用。
 
 ## P1 — Provider worker、Owner UX 與 production observability（2–6 個月）
@@ -36,7 +36,7 @@
 11. **CHB-039｜Change delivery operations｜M｜implemented_local foundation / provider_verified pending / live_verified pending**：HTTPS host allowlist、metadata-only payload、retry/dead-letter 與 safe error-code 已覆蓋；簽章輪替、pause/resume、inspect/replay API 與 NAS alert wiring 尚待完成。
 12. **CHB-040｜Memory re-verification queue｜L｜proposed**：依 freshness、outcome、conflict、successor 產生 reviewer queue；永不自動改動 accepted Memory。
 13. **CHB-041｜Portability recovery drill｜M｜proposed**：以合成資料定期驗證 namespace export/import/dry-run/rollback、checksum、版本與 audit；不建立第二權威。
-14. **CHB-042｜Agent Memory Federation v1 與 compatibility matrix｜M｜implemented_local / provider_verified pending / live_verified pending**：schema v15 `claim_key`、pointer-only local cache contract、conflict-safe compiler、MCP instructions，以及 OpenAI／Anthropic／Hermes target 的 session、cache refresh、candidate、successor、conflict exclusion、namespace isolation 本機 contract tests 已完成。仍須用真實 Codex、Claude、Hermes clients 分別驗證 legacy/enrollment initialize、instructions 與完整流程；不得把本機 MCP SDK 測試當成 provider 或 NAS production 證據，也不提前啟用 P3 OAuth。
+14. **CHB-042｜Agent Memory Federation v1 與 compatibility matrix｜M｜implemented_local / live_verified / provider_verified pending**：schema v15 `claim_key`、pointer-only local cache contract、conflict-safe compiler、MCP instructions，以及 OpenAI／Anthropic／Hermes target 的 session、cache refresh、candidate、successor、conflict exclusion、namespace isolation 本機 contract tests 已完成，且 Federation release 已部署並通過 NAS evidence。仍須用真實 Codex、Claude、Hermes clients 分別驗證 legacy/enrollment initialize、instructions 與完整流程；不得把本機 MCP SDK 測試或 production health 當成 product client provider evidence，也不提前啟用 P3 OAuth。
 
 ## P3 — 只在量測 gate 通過後執行
 

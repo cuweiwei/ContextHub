@@ -53,6 +53,8 @@ Agent runtime 仍負責 system/user instructions 與即時 tool output 的最後
 
 Agent 內建 memory 與 ContextHub 不是兩個平行真相：local memory 只負責單一 agent/workspace 的局部規則、metadata pointer 或尚待送審的 candidate；跨 Codex、Claude、Hermes 共用的長期記憶以 ContextHub accepted surface 為準。Local cache 不複製完整內容，只保存 `hub_item_id`、`revision`、`change_cursor`、`cached_at`；遇到同一 `claim_key` 多個 accepted winner 時，compiler 回傳 `conflicts[]` 並排除全部 claimant，不靜默挑選。
 
+協作循環是：agent 在新任務先向 ContextHub 編譯最小必要 context；當前使用者指令可在安全與政策邊界內主導本次 action，但不會靜默改寫長期 Memory；值得保存的新資訊由 agent 提 candidate，過時 accepted Memory 以 successor 修正，最後由 owner/reviewer 裁決。Local memory 不得覆蓋 hub 裁決，personal/work credential 也不得混用。完整優先序與操作契約見 [Federation 協作原則](docs/AGENT-MEMORY-FEDERATION.md) §2。
+
 ## 本機開發
 
 ```bash
