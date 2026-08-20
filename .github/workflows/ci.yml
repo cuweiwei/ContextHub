@@ -93,7 +93,9 @@ jobs:
       - name: Read package version
         id: package-version
         shell: bash
-        run: echo "version=$(node -p 'require(\"./package.json\").version')" >> "$GITHUB_OUTPUT"
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Log in to GHCR on main
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772
