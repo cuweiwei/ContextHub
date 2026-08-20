@@ -3,7 +3,26 @@
 這份文件補足 [NAS Deployment Runbook](NAS-DEPLOY-RUNBOOK.md) 的外部設定。repo 內的
 workflow、manifest、wrapper 與測試已準備好，但 GitHub ruleset、environment、Tailscale
 ACL、NAS SSH key 和 Synology 排程必須由 owner 在各自系統套用；未套用前不得宣稱
-`provider_verified` 或 `live_verified`。
+自動部署路徑已 `provider_verified` 或 production 已 `live_verified`。
+
+## Current evidence snapshot
+
+截至 2026-08-20，[main CI run 32324323535](https://github.com/cuweiwei/ContextHub/actions/runs/32324323535)
+已對 `0.9.0@4c3a09a35348cc319316226a1c0691bf1d7cfad5` 完成全部 gates，並產生：
+
+- GHCR `linux/amd64` immutable digest
+  `sha256:eb682cdd47e92c5569e0e9a58b4ea795c0687d4c6aeea1fc2a179163b2abd3af`；
+- `contexthub-sbom-32324323535`；
+- GitHub build provenance attestation；
+- `ReleaseManifestV1`，其 version、commit、digest、CI URL 與 provenance subject 已交叉驗證。
+
+GHCR manifest 可讀取，`gh attestation verify` 已通過，所以 immutable release 本身已
+`provider_verified`。Production 的 8788 與 8443 `/health` 目前也回報相同 version／commit、
+schema 14、audit writable 與 projection ready。但 GitHub 尚無 `production` environment，也無
+`ContextHub production deploy` workflow run；因此無法證明 running image digest，也沒有同一次
+deployment 的 backup manifest、restore drill、doctor、rollback image 與 `DEPLOYMENT VERIFIED`
+evidence。這些都完成前，production 仍是「服務與 commit 已觀察、正式
+`live_verified` 尚未完成」。
 
 ## GitHub repository settings
 

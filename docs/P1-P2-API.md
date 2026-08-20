@@ -12,4 +12,4 @@ The following endpoints are implemented behind the existing namespace credential
 - `POST /v1/context/compile` and MCP `compile_context` accept at most 20 runtime inputs, 10 KB per input and 50 KB total; inputs are untrusted and ephemeral.
 - MCP protected-resource metadata is available at root and `/mcp` path-specific well-known routes when OAuth is enabled.
 
-CLI additions include `audit-verify`, `audit-anchor`, `audit-chain-extend`, `namespace-export`, `namespace-import`, and `namespace-import-rollback`. `audit-anchor` requires an output path outside `DATA_DIR`.
+CLI additions include `audit-verify`, `audit-anchor`, `audit-chain-extend`, `oauth-bind`, `namespace-export`, `namespace-import`, and `namespace-import-rollback`. `audit-anchor` requires an output path outside `DATA_DIR`. `oauth-bind --issuer <issuer> --subject <subject> --client <client-id>` is an owner-only NAS operation that maps one verified issuer/subject to one existing namespace-bound client; it does not create a cross-namespace identity or bypass policy.

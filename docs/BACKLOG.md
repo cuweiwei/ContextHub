@@ -4,7 +4,7 @@
 
 ## Evidence model
 
-截至 2026-08-20，`main@f41408e3e7d1bdae01bf08ae66ba6f73abd863c6`、package version `0.9.0` 已有本機與 GitHub CI 證據；production 尚未以這個 commit/digest 驗證。
+截至 2026-08-20，`0.9.0@4c3a09a35348cc319316226a1c0691bf1d7cfad5` 是最新已驗證 release snapshot：[main CI run 32324323535](https://github.com/cuweiwei/ContextHub/actions/runs/32324323535) 已通過 core、E2E、retrieval、browser、dependency／image scan，並產出 SBOM、provenance 與 `ReleaseManifestV1`；GHCR digest `sha256:eb682cdd47e92c5569e0e9a58b4ea795c0687d4c6aeea1fc2a179163b2abd3af` 可讀取且 attestation 驗證通過。Production 的 8788／8443 `/health` 已回報相同 version／commit、schema 14、audit writable 與 projection ready；但 GitHub `production` environment、正式 deploy workflow run、digest-to-running-image 證據與完整 `DeploymentEvidenceV1` 仍缺，所以尚不符合完整 `live_verified`。
 
 功能狀態與證據分開記錄：
 
@@ -17,11 +17,11 @@
 
 ## P0 — 發布、部署與資料恢復可信化（0–2 個月）
 
-1. **CHB-029｜Backlog 與證據重新對帳｜S｜in_progress**：`implemented_local`（本文件與 contracts 已更新）；`provider_verified`、`live_verified` 仍待外部驗證；P3 保持不變。
+1. **CHB-029｜Backlog 與證據重新對帳｜S｜implemented_local**：本文件、release snapshot、CI／registry 證據與 production health 觀察已對帳；尚未完成的 provider／deployment 證據仍明確保持 pending，P3 保持不變。
 2. **CHB-030｜保護 main 與重整 CI｜M｜implemented_local / provider_verified pending / live_verified pending**：repo 已有 PR/main CI、required `verify` 聚合、SHA pin、ShellCheck、Dependabot 與 image CVE gate；GitHub ruleset 尚未由本次本機變更套用。
-3. **CHB-031｜不可變 Container Release｜M｜implemented_local / provider_verified pending / live_verified pending**：workflow 已定義公開 GHCR `linux/amd64`、digest、SBOM、provenance attestation 與 `ReleaseManifestV1`；尚待 main CI 實際產出並由 registry 驗證。
+3. **CHB-031｜不可變 Container Release｜M｜implemented_local / provider_verified / live_verified pending**：main CI 已實際產出公開 GHCR `linux/amd64` digest、SBOM、provenance attestation 與 `ReleaseManifestV1`；registry digest 與 GitHub attestation 均已驗證。尚未有正式 NAS deployment evidence。
 4. **CHB-032｜Owner 核准後自動部署 NAS｜L｜implemented_local / provider_verified pending / live_verified pending**：workflow、Tailscale OIDC、受限 SSH wrapper、root dispatcher 與 digest `nas-deploy.sh` 已完成；GitHub environment、Tailscale ACL/identity、NAS key/wrapper 尚未套用。
-5. **CHB-033｜0.9.0 首次正式部署與 live acceptance｜M｜blocked**：CHB-030～032 完成後，部署精確 digest，驗證 8788/8443 health、REST/MCP、Control Center、reindex、restore drill、doctor 與 `DEPLOYMENT VERIFIED`。
+5. **CHB-033｜0.9.0 首次正式部署與 live acceptance｜M｜blocked（health observed，formal acceptance pending）**：8788／8443 health 已觀察到 `0.9.0@4c3a09a`，但不能由 health 反推 running image digest、restore drill、doctor 或 rollback evidence。待 CHB-030／032 的 GitHub ruleset、production environment、Tailscale／SSH 邊界完成後，以精確 digest 執行正式 workflow，取得 REST／MCP、Control Center、reindex、restore drill、doctor 與 `DEPLOYMENT VERIFIED` 證據。
 6. **CHB-034｜維運排程與失敗告警｜M｜implemented_local foundation / provider_verified pending / live_verified pending**：`scripts/nas-maintenance.sh`、維運 records、doctor、backup/restore/GC 與 metadata-only notification retry/dead-letter 測試已在本機；Synology tasks 與 Telegram 仍待唯讀盤點和 owner 啟用。
 
 ## P1 — Provider worker、Owner UX 與 production observability（2–6 個月）

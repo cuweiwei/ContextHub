@@ -11,7 +11,10 @@
 [docs/BACKLOG.md](docs/BACKLOG.md)；信任邊界與資料治理見
 [docs/ADR-001](docs/ADR-001-trust-boundary.md)；Context／Memory 分層決策見
 [docs/ADR-002](docs/ADR-002-context-memory-separation.md)；v6 混合查找決策見
-[docs/ADR-003](docs/ADR-003-hybrid-memory-retrieval.md)。
+[docs/ADR-003](docs/ADR-003-hybrid-memory-retrieval.md)；Control Center 認證決策見
+[docs/ADR-004](docs/ADR-004-control-center-auth.md)；0.9.0 的 P1/P2 治理與整合決策見
+[docs/ADR-005](docs/ADR-005-p1-p2-integrations.md)，新增介面摘要見
+[docs/P1-P2-API.md](docs/P1-P2-API.md)。
 
 ```mermaid
 flowchart TB
@@ -85,9 +88,10 @@ npm run cli -- policy-apply --namespace work --file /tmp/work-policy.json
 
 初次安裝可依下列 compose 步驟；既有 production 的正式升級不要手動組合 build/restart
 命令，請使用 [NAS Deployment Runbook](docs/NAS-DEPLOY-RUNBOOK.md) 與
-`scripts/nas-deploy.sh`。標準流程會從 clean Git archive build、先建立 verified manifest、
-通過 read-only upgrade gate，才 recreate container，並自動執行 health、reindex、restore
-drill、doctor 與 image rollback。
+`scripts/nas-deploy.sh`。正式流程會拉取 CI 產生的 immutable GHCR digest、先建立 verified
+backup manifest、通過 read-only upgrade gate，才 recreate container，並自動執行 health、
+reindex、restore drill、doctor 與 image rollback。從 clean Git archive 在 NAS build 的
+`--ref` 路徑只保留給 owner 手動 recovery。
 
 正式 CI/CD 會從 main 建立公開 GHCR immutable digest、SBOM、provenance 與 release manifest；
 owner approval、Tailscale ephemeral runner、受限 SSH 與外部設定見
@@ -211,12 +215,12 @@ src/
            #   items-repo(applyFilters:namespace+trust+ACL+validity)、policy/policies-repo、audit-repo、
            #   local-embedding(pluggable on-device provider)、clients-repo、canonical、cjk、errors
   http/    # Fastify:auth + /v1 routes(items/candidates/review/task-op/curate/state/
-           #   history/audit/policies/clients/namespaces)+ /explore + /review
-           #   + Control Center + health
+           #   history/audit/policies/clients/namespaces/changes/connectors/entities/migrations)
+           #   + /explore + /review + Control Center + health
   mcp/     # MCP server(21 tools)+ Streamable HTTP 掛載(stateless,一 key 一 namespace)
   db/      # SQLite+sqlite-vec 連線(synchronous=FULL、instance lock)+ migrations(v1–v14)
-  cli.ts   # create-client/.../reindex/retrieval-status/backup/purge/...
-scripts/   # retrieval-benchmark.ts、e2e.sh、restore.sh(NAS runbook)
+  cli.ts   # client/policy/review/audit/OAuth/namespace portability/reindex/backup/restore/...
+scripts/   # e2e/retrieval、release manifest、upgrade gate、NAS deploy/maintenance
 test/      # 100+ tests:隔離/信任/政策/稽核 fail-closed/idempotency/一致性/還原邊界
-docs/      # USER-GUIDE、AGENT-GUIDE、CODEX、DESIGN、ADR-001/002/003
+docs/      # USER/AGENT/CODEX guides、DESIGN、ADR-001–005、API 與 deployment runbooks
 ```

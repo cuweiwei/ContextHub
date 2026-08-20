@@ -2,7 +2,7 @@
 
 > 單節點、隱私優先、具 namespace 隔離、信任升格、Memory 生命週期與短暫 Context 編譯能力的**跨 AI Context Control Plane**，部署於私人 NAS。Codex、Claude Code、個人 Hermes、工作 Hermes 共用由使用者擁有、與 AI vendor 無關的 context domain。
 
-信任邊界、work 資料治理、DR 承諾見 [ADR-001](ADR-001-trust-boundary.md)；Context／Memory 分層決策見 [ADR-002](ADR-002-context-memory-separation.md)；v6 混合查找決策見 [ADR-003](ADR-003-hybrid-memory-retrieval.md)。
+信任邊界、work 資料治理、DR 承諾見 [ADR-001](ADR-001-trust-boundary.md)；Context／Memory 分層決策見 [ADR-002](ADR-002-context-memory-separation.md)；v6 混合查找決策見 [ADR-003](ADR-003-hybrid-memory-retrieval.md)；Control Center 認證邊界見 [ADR-004](ADR-004-control-center-auth.md)；0.9.0 P1/P2 治理、可攜性與整合決策見 [ADR-005](ADR-005-p1-p2-integrations.md)，新增介面摘要見 [P1-P2 API notes](P1-P2-API.md)。
 
 ## 1. 問題與動機
 
@@ -73,6 +73,8 @@ ContextHub 的 compiler 只處理持久資訊與明確要求的 operational stat
 | `/mcp/:namespace` | canonical MCP resource | legacy key 相容路徑；namespace 必須與 server-side credential 相同 |
 
 Control Center 的 Web principal、session、principal-to-human-client links、agent enrollment 與 activity projection 由 migration v8 新增。`web_principals.control_admin` 只授予管理平面能力；Memory／Review 仍解析 linked human client 後呼叫既有 `commands` 與 policy/ACL/audit。Enrollment code 與 session/CSRF secret 僅保存 hash，raw 值只在必要 response 出現一次。
+
+Migration v10–v14 增加 audit hash chain、migration campaign／namespace portability metadata、change delivery／notification operational state、entity graph／consolidation projection 與 connector run metadata。這些新增表不改變權威邊界：Memory 仍只以 SQLite `context_items` 為權威，graph、embedding、facet 與 analytics 仍是可重建 projection；connector 只能經 allowlist 與 `core/commands.ts` 寫入最小化投影。
 
 **一 key 一 namespace**:credential 本身就是 namespace 邊界。Claude Code 要同時用個人與工作記憶,就設兩個 MCP 連線(兩把 key)。namespace 與 source 一樣由 server 從認證身分決定,request body 傳什麼都沒用。
 
@@ -193,6 +195,7 @@ Compiler 回傳 `package_id`、sections、constraints、estimated tokens 與 `re
 |---|---|
 | `POST /v1/items` | create_memory:trust 由 create_rules 決定;`idempotency_key` 必填;per-type upsert 同 §4 |
 | `POST /v1/items/batch` | ≤100 筆單 transaction;`Idempotency-Key` header 必填 |
+| `POST /v1/items/reviews/batch` | 1–20 筆逐筆裁決；revision／idempotency 與 namespace/count/private confirmation 全部在 server 驗證 |
 | `GET /v1/items` | 搜尋/列表(預設 `retrieval_mode=hybrid`，可設 lexical；`entity` hints；`information_class`、`memory_kind`、`entity_exact` 硬過濾；accepted 面) |
 | `GET /v1/curation-suggestions` | 只讀回傳 duplicate/conflict/stale/expired `working_state` 建議，不會修改 accepted Memory |
 | `GET /v1/items/:id` | 無權/跨 namespace/不存在同回 404 |
@@ -209,16 +212,22 @@ Compiler 回傳 `package_id`、sections、constraints、estimated tokens 與 `re
 | `GET/PUT /v1/state/:key` | operational state(state_rules 裁決) |
 | `POST /v1/context/compile` | 依 intent/ACL/validity/budget 編譯短暫 Context Package；不持久化 intent/package |
 | `POST /v1/context/outcomes` | 寫入 coarse action-effectiveness feedback；不保存 prompt/action/package content |
-| `GET /v1/audit` | 稽核查詢(admin 全部;audit.read 限own namespace) |
-| `GET/PUT /v1/policies/:ns`、`GET /v1/policies/:ns/versions/:v` | 政策讀取/升版(policy.manage 限own ns)/歷史版 |
+| `GET /v1/changes`、`POST /v1/changes/subscriptions` | namespace cursor feed；subscription 只保存 metadata，不保存 signing secret |
+| `POST /v1/entities/traverse`、`GET /v1/consolidation/suggestions` | ACL-first graph traversal 與只讀整理建議；不自動修改 accepted Memory |
+| `POST /v1/connectors/runs`、`POST /v1/connectors/tombstones` | metadata-only worker 狀態；tombstone 僅允許 service owner |
+| `POST/GET /v1/migrations/campaigns...`、`POST /v1/migrations/sources`、`POST /v1/migrations/ledger` | coverage-only migration campaign／source／ledger／gate 狀態 |
+| `GET /v1/audit` 及 `/export`、`/verify`、`/operations` | namespace-bounded 查詢／匯出；chain verify 與 operations 為 admin-gated |
+| `GET/PUT /v1/policies/:ns`、`GET .../versions/:v`、`POST .../validate`、`.../simulate`、`.../rollback` | 政策讀取、驗證、模擬、升版與 rollback；寫入支援 `base_version` optimistic concurrency |
 | `POST /v1/clients`(namespace+principal_kind 必填,選配 profile)、`POST /v1/clients/:id/rotate-key`、`PATCH /v1/clients/:id`、`GET/POST /v1/namespaces`、`GET/PUT /v1/state-schemas/:id` | 管理(admin) |
 | `GET /health` | 無敏感 readiness（service/version/build/schema/model 與 audit/migration/projection/disk 狀態） |
+
+0.9.0 新增參數限制、CLI 與 OAuth protected-resource metadata 細節見 [P1-P2 API notes](P1-P2-API.md)。Control Center 的 `/v1/control/*` 路由使用 Tailscale identity 建立的 web session，Memory 讀寫仍解析 linked namespace-scoped human client 後呼叫同一組 commands。
 
 ## 11. MCP tools(21 個)
 
 Endpoint `POST /mcp`(Streamable HTTP stateless)。連線=namespace 邊界。
 
-讀取面：`compile_context`（短暫 package，包含 retrieval diagnostics）、`search_context`（`mode=hybrid|lexical`、entity hints、`information_classes`、`memory_kinds`、`entity_filters`、`include_candidates`=自己的）、`curation_suggestions`（只讀 hygiene 建議）、`get_current_context`、`get_recent_context`、`get_context_item`、`get_context_brief`、`list_context_sources`、`get_memory_history`、`my_candidates`。
+讀取面：`compile_context`（短暫 package，包含 retrieval diagnostics）、`search_context`（`mode=hybrid|lexical`、entity hints、`information_classes`、`memory_kinds`、`entity_filters`、`include_candidates`=自己的）、`curation_suggestions`（只讀 hygiene 建議）、`get_changes`、`traverse_entity_graph`、`get_current_context`、`get_recent_context`、`get_context_item`、`get_context_brief`、`list_context_sources`、`get_memory_history`、`my_candidates`。
 
 記憶／回饋生命週期：`save_memory`（通用建立＋memory_kind/validity/decay）、`propose_insight`、`revise_my_candidate`、`propose_successor`、`record_context_outcome`、`operate_task`、`curate_note`、`update_operational_state`、`get_operational_state`。
 
@@ -241,7 +250,8 @@ FTS5 unicode61 + 字級切分（索引與查詢對稱），2 字中文詞可搜�
 ## 14. 部署、備份、還原(NAS)
 
 ```bash
-echo "ADMIN_TOKEN=$(openssl rand -base64 32)" > .env
+cp .env.example .env
+# 在 NAS 上將 ADMIN_TOKEN 設成新隨機值；不要把值貼進 chat、Git 或 shell history。
 docker compose up -d --build
 docker compose exec contexthub node dist/cli.js create-client \
   --id hermes-personal --name "Hermes 秘書" --namespace personal \
@@ -254,8 +264,8 @@ docker compose exec contexthub node dist/cli.js retrieval-status # ready 必須�
 - **還原演練**:`cli restore-drill --snapshot <manifest>` 將快照複製到 OS temp，隔離 migration/reindex/health/query/history/audit/idempotency 驗證；不開啟 production DB。正式升級先通過 `scripts/upgrade-gate.sh`，rollback 優先回上一 image。
 - **每月 restore drill**(ADR-001):拿最新快照實際還原到隔離目錄驗證。`npm run e2e` 內建整條 備份→還原→reindex→驗證 流程。
 - Retention:versions/audit 永久;idempotency 90 天(`idempotency-gc` 排程);快照依 NAS 輪替。
-- Tailscale 私網,不開公網 port。Compose 的 host publication 必須綁 NAS 的
-  Tailscale IP(或 local-only 的 loopback),不可綁 `0.0.0.0` 或 NAS 公網 IP。
+- Tailscale 私網,不開公網 port。Compose 的 host publication 必須維持
+  `127.0.0.1`，再由 Tailscale Serve 轉送；不可直接綁 Tailscale IP、`0.0.0.0` 或 NAS 公網 IP。
 
 ## 15. Roadmap(v7+)
 

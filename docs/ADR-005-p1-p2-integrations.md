@@ -21,4 +21,4 @@ Accepted for the 0.9.0 local implementation. No NAS or provider activation is im
 
 ## Evidence boundary
 
-The repository has local unit, E2E, browser, hygiene and dependency-audit evidence. Provider OAuth/Calendar/GitHub/Telegram and NAS performance evidence are intentionally pending; fixtures and adapters are not live deployment proof.
+The repository and main CI have unit, E2E, browser, hygiene, dependency-audit, image-scan and retrieval evidence. The 0.9.0 immutable GHCR digest, SBOM, provenance and release manifest have also been verified. Provider OAuth/Calendar/GitHub/Telegram, formal NAS deployment evidence and NAS performance evidence are intentionally pending; fixtures, adapters, a green release workflow and matching live health are not by themselves complete deployment proof.

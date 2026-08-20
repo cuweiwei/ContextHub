@@ -39,6 +39,22 @@ git -C "$SOURCE_DIR" merge --ff-only origin/main
 
 ## Read-only preflight
 
+正式 immutable release 先從成功的 main CI `ReleaseManifestV1` 取得 digest、commit、version 與
+workflow URL，再執行：
+
+```bash
+bash /volume1/docker/contexthub/scripts/nas-deploy.sh \
+  --source-dir /volume1/docker/contexthub \
+  --app-dir /volume1/docker/contexthub/v4-ee0e0e2 \
+  --image ghcr.io/cuweiwei/contexthub@sha256:<64-hex-digest> \
+  --expected-commit <full-main-sha> \
+  --expected-version <semver> \
+  --workflow-url https://github.com/cuweiwei/ContextHub/actions/runs/<run-id> \
+  --preflight-only
+```
+
+Owner 手動 recovery build 才使用 Git ref：
+
 ```bash
 bash /volume1/docker/contexthub/scripts/nas-deploy.sh \
   --source-dir /volume1/docker/contexthub \
@@ -87,13 +103,15 @@ bash /volume1/docker/contexthub/scripts/nas-deploy.sh \
 Script 依序執行：
 
 1. 以 running container image 建立 timestamped rollback tag。
-2. 從指定 commit 的 clean `git archive` 建 candidate，不把 NAS untracked files、`.env` 或
-   production data 放進 Docker build context。
+2. 正式 image mode 只 pull 指定的 GHCR digest 並標成 candidate，不在 NAS build；
+   owner recovery `--ref` mode 才從指定 commit 的 clean `git archive` 建 candidate，不把
+   NAS untracked files、`.env` 或 production data 放進 Docker build context。
 3. 驗證 OCI version/revision labels。
 4. 由 running release 建 `BackupManifestV1`；legacy release 無 manifest 時，candidate 只以
    no-migration backup 模式建立 snapshot/manifest。
 5. 對 read-only-mounted snapshot 執行 upgrade gate；candidate 此時尚未啟動。
-6. Gate 通過後才將 candidate 標成 `contexthub:latest` 並 recreate container。
+6. Gate 通過後才將 candidate 標成 `contexthub:latest` 並 recreate container；image mode
+   的 Compose 實際使用仍是精確 digest，recovery mode 才使用本機 candidate tag。
 7. 驗證 redacted health 的 version/commit，執行 reindex、retrieval status、isolated restore
    drill、90-day idempotency GC 與 production doctor。
 8. 驗證 running image ID，寫入 metadata-only release evidence。
