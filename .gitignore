@@ -12,3 +12,7 @@ scripts/retrieval-eval.private.json
 # Owner-only aliases and multilingual/private retrieval fixtures.
 scripts/*alias*.json
 scripts/*private*.json
+config/connectors/*.json
+!config/connectors/*.example.json
+audit-anchors/
+artifacts/

@@ -89,6 +89,11 @@ npm run cli -- policy-apply --namespace work --file /tmp/work-policy.json
 通過 read-only upgrade gate，才 recreate container，並自動執行 health、reindex、restore
 drill、doctor 與 image rollback。
 
+正式 CI/CD 會從 main 建立公開 GHCR immutable digest、SBOM、provenance 與 release manifest；
+owner approval、Tailscale ephemeral runner、受限 SSH 與外部設定見
+[CI/CD Runbook](docs/CI-CD-RUNBOOK.md)。NAS 正式 release 使用 `--image ...@sha256:<digest>`；
+`--ref` 的 Git archive build 僅保留給 owner 手動 recovery。
+
 ```bash
 git clone <this repo> && cd ContextHub
 cp .env.example .env

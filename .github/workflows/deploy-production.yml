@@ -1,0 +1,156 @@
+name: ContextHub production deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_sha:
+        description: Full 40-character commit SHA from a successful main release
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: contexthub-production
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: cuweiwei/contexthub
+
+jobs:
+  preflight:
+    name: Verify immutable release
+    runs-on: ubuntu-latest
+    outputs:
+      commit: ${{ steps.release.outputs.commit }}
+      version: ${{ steps.release.outputs.version }}
+      image: ${{ steps.pull.outputs.image }}
+    steps:
+      - name: Require main workflow ref
+        run: test "$GITHUB_REF" = refs/heads/main
+      - name: Checkout main history
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Validate target is an ancestor of main
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          [[ "$RELEASE_SHA" =~ ^[0-9a-fA-F]{40}$ ]]
+          git cat-file -e "$RELEASE_SHA^{commit}"
+          git merge-base --is-ancestor "$RELEASE_SHA" origin/main
+      - name: Read target version
+        id: release
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        shell: bash
+        run: |
+          version=$(git show "$RELEASE_SHA:package.json" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).version))')
+          tag="$REGISTRY/$IMAGE_NAME:sha-$RELEASE_SHA"
+          echo "commit=$RELEASE_SHA" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: Pull immutable image
+        id: pull
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker pull "$TAG"
+          image=$(docker image inspect --format '{{index .RepoDigests 0}}' "$TAG")
+          [[ "$image" =~ ^ghcr\.io/cuweiwei/contexthub@sha256:[0-9a-f]{64}$ ]]
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+      - name: Verify OCI labels
+        env:
+          IMAGE: ${{ steps.release.outputs.tag }}
+          COMMIT: ${{ steps.release.outputs.commit }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE")" = "$COMMIT"
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$IMAGE")" = "$VERSION"
+      - name: Verify GitHub provenance attestation
+        env:
+          IMAGE: ${{ steps.release.outputs.tag }}
+        run: gh attestation verify "oci://$IMAGE" -R "$GITHUB_REPOSITORY"
+
+  deploy:
+    name: Deploy to NAS after owner approval
+    needs: preflight
+    if: needs.preflight.result == 'success'
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Join private tailnet with an ephemeral identity
+        uses: tailscale/github-action@780049a30b6ff5c378a9e7b389d15ece7a204888
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          audience: ${{ secrets.TS_AUDIENCE }}
+          tags: tag:context-hub-deploy
+          ping: ${{ vars.NAS_HOST }}
+      - name: Prepare SSH identity
+        env:
+          DEPLOY_KEY: ${{ secrets.NAS_DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.NAS_SSH_KNOWN_HOSTS }}
+        run: |
+          umask 077
+          printf '%s\n' "$DEPLOY_KEY" > "$RUNNER_TEMP/contexthub-deploy-key"
+          printf '%s\n' "$KNOWN_HOSTS" > "$RUNNER_TEMP/contexthub-known-hosts"
+      - name: Run constrained NAS deployment
+        env:
+          NAS_HOST: ${{ vars.NAS_HOST }}
+          NAS_USER: ${{ vars.NAS_USER }}
+          IMAGE: ${{ needs.preflight.outputs.image }}
+          COMMIT: ${{ needs.preflight.outputs.commit }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          WORKFLOW_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ssh_opts=(-i "$RUNNER_TEMP/contexthub-deploy-key" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/contexthub-known-hosts")
+          ssh "${ssh_opts[@]}" "$NAS_USER@$NAS_HOST" \
+            "contexthub-deploy --image '$IMAGE' --expected-commit '$COMMIT' --expected-version '$VERSION' --workflow-url '$WORKFLOW_URL'" \
+            | tee "$RUNNER_TEMP/deployment-evidence.log"
+          grep -F "DEPLOYMENT VERIFIED commit=$COMMIT version=$VERSION" "$RUNNER_TEMP/deployment-evidence.log"
+      - name: Verify private data-plane health
+        env:
+          HEALTH_URL: ${{ vars.NAS_HEALTH_URL }}
+          COMMIT: ${{ needs.preflight.outputs.commit }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          body=$(curl --fail-with-body --connect-timeout 5 --max-time 15 -fsS "$HEALTH_URL")
+          printf '%s\n' "$body" > "$RUNNER_TEMP/health.json"
+          jq -e --arg commit "$COMMIT" --arg version "$VERSION" \
+            '.status == "ok" and .version == $version and .build_commit == $commit and .audit_writable == true and .checks.retrieval_projection_ready == true' \
+            "$RUNNER_TEMP/health.json"
+      - name: Verify private Control Center health when configured
+        if: vars.NAS_CONTROL_HEALTH_URL != ''
+        env:
+          CONTROL_HEALTH_URL: ${{ vars.NAS_CONTROL_HEALTH_URL }}
+          COMMIT: ${{ needs.preflight.outputs.commit }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          curl --fail-with-body --connect-timeout 5 --max-time 15 -fsS "$CONTROL_HEALTH_URL" > "$RUNNER_TEMP/control-health.json"
+          jq -e --arg commit "$COMMIT" --arg version "$VERSION" \
+            '.status == "ok" and .version == $version and .build_commit == $commit' \
+            "$RUNNER_TEMP/control-health.json"
+      - name: Record Control Center health omission
+        if: vars.NAS_CONTROL_HEALTH_URL == ''
+        run: printf '%s\n' '{"status":"not_configured"}' > "$RUNNER_TEMP/control-health.json"
+      - name: Upload metadata-only deployment evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: contexthub-deployment-${{ needs.preflight.outputs.commit }}
+          path: |
+            ${{ runner.temp }}/deployment-evidence.log
+            ${{ runner.temp }}/health.json
+            ${{ runner.temp }}/control-health.json
+          if-no-files-found: error

@@ -44,4 +44,18 @@ export class ConnectorRestClient {
   }
 
   changes(after = 0, limit = 100) { return this.request(`/v1/changes?after=${encodeURIComponent(after)}&limit=${encodeURIComponent(limit)}`); }
+
+  async getOperationalState(key: string): Promise<{ value: unknown; revision: number | null; item?: unknown }> {
+    const body = await this.request(`/v1/state/${encodeURIComponent(key)}`) as { item?: { data?: { value?: unknown }; revision?: number } };
+    return { value: body.item?.data?.value ?? null, revision: typeof body.item?.revision === 'number' ? body.item.revision : null, item: body.item };
+  }
+
+  putOperationalState(key: string, value: unknown, schemaId: string, expectedRevision: number | null, idempotencyKey: string) {
+    const payload = { value, schema_id: schemaId, idempotency_key: idempotencyKey, ...(expectedRevision === null ? {} : { expected_revision: expectedRevision }) };
+    return this.request(`/v1/state/${encodeURIComponent(key)}`, {
+      method: 'PUT',
+      headers: { 'Idempotency-Key': idempotencyKey },
+      body: JSON.stringify(payload),
+    });
+  }
 }

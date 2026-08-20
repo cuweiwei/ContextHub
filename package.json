@@ -21,7 +21,11 @@
     "e2e": "bash scripts/e2e.sh",
     "cli": "tsx src/cli.ts",
     "test:browser": "node scripts/browser-smoke.mjs",
-    "hygiene": "bash scripts/check-repo-hygiene.sh"
+    "hygiene": "bash scripts/check-repo-hygiene.sh",
+    "release:manifest": "tsx scripts/create-release-manifest.ts",
+    "production:drift": "tsx scripts/check-production-drift.ts",
+    "connector:github": "tsx src/connectors/github-worker-main.ts",
+    "connector:calendar": "tsx src/connectors/google-calendar-worker-main.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

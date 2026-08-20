@@ -1,0 +1,8 @@
+{
+  "contextHubUrl": "http://127.0.0.1:8788",
+  "contextHubKeyFile": "/run/secrets/context-hub-connector-key",
+  "checkpointSchemaId": "google-calendar-sync/v1",
+  "calendars": ["primary"],
+  "api_base_url": "https://www.googleapis.com/calendar/v3",
+  "page_size": 250
+}

@@ -39,13 +39,19 @@ export function enqueueChangeNotification(db: DB, input: { namespace: string; ca
 
 export const DELIVERY_RETRY_DELAYS_MS = [60_000, 5 * 60_000, 30 * 60_000, 2 * 3_600_000, 12 * 3_600_000];
 
+function safeErrorCode(value: string): string {
+  const match = value.toLowerCase().match(/(?:http_[0-9]{3}|timeout|aborted|notification_[a-z0-9_]+|provider_[a-z0-9_]+)/);
+  return match?.[0] ?? 'notification_error';
+}
+
 export function recordDeliveryFailure(db: DB, deliveryId: string, errorCode: string, now = new Date()): 'retry' | 'dead_letter' {
   const row = db.prepare('SELECT attempts, subscription_id FROM change_deliveries WHERE id = ?').get(deliveryId) as { attempts: number; subscription_id: string } | undefined;
   if (!row) throw new Error('delivery not found');
   const attempts = row.attempts + 1;
-  if (attempts >= 8) { db.prepare("UPDATE change_deliveries SET attempts = ?, status = 'dead_letter', last_error_code = ? WHERE id = ?").run(attempts, errorCode, deliveryId); db.prepare("UPDATE change_subscriptions SET status = 'dead_letter', pending_count = CASE WHEN pending_count > 0 THEN pending_count - 1 ELSE 0 END, updated_at = ? WHERE id = ?").run(now.toISOString(), row.subscription_id); return 'dead_letter'; }
+  const code = safeErrorCode(errorCode);
+  if (attempts >= 8) { db.prepare("UPDATE change_deliveries SET attempts = ?, status = 'dead_letter', last_error_code = ? WHERE id = ?").run(attempts, code, deliveryId); db.prepare("UPDATE change_subscriptions SET status = 'dead_letter', pending_count = CASE WHEN pending_count > 0 THEN pending_count - 1 ELSE 0 END, updated_at = ? WHERE id = ?").run(now.toISOString(), row.subscription_id); return 'dead_letter'; }
   const delay = DELIVERY_RETRY_DELAYS_MS[Math.min(attempts - 1, DELIVERY_RETRY_DELAYS_MS.length - 1)]!;
-  db.prepare("UPDATE change_deliveries SET attempts = ?, status = 'retry', last_error_code = ?, next_attempt_at = ? WHERE id = ?").run(attempts, errorCode, new Date(now.getTime() + delay).toISOString(), deliveryId); return 'retry';
+  db.prepare("UPDATE change_deliveries SET attempts = ?, status = 'retry', last_error_code = ?, next_attempt_at = ? WHERE id = ?").run(attempts, code, new Date(now.getTime() + delay).toISOString(), deliveryId); return 'retry';
 }
 
 export class NotificationDispatcher {
@@ -67,7 +73,7 @@ export class NotificationDispatcher {
         } else throw new Error('notification provider is not configured');
         if (!response.ok) throw new Error(`http_${response.status}`);
         this.db.prepare("UPDATE change_deliveries SET status = 'delivered', delivered_at = ? WHERE id = ?").run(now.toISOString(), delivery.id); this.db.prepare('UPDATE change_subscriptions SET pending_count = CASE WHEN pending_count > 0 THEN pending_count - 1 ELSE 0 END, updated_at = ? WHERE id = ?').run(now.toISOString(), delivery.subscription_id); delivered += 1;
-      } catch (err) { recordDeliveryFailure(this.db, delivery.id, (err as Error).message.slice(0, 100), now); failed += 1; }
+      } catch (err) { recordDeliveryFailure(this.db, delivery.id, (err as Error).message, now); failed += 1; }
     }
     return { delivered, failed };
   }

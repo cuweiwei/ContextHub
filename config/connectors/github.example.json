@@ -1,0 +1,9 @@
+{
+  "contextHubUrl": "https://contexthub.example",
+  "contextHubKeyFile": "/run/secrets/context-hub-connector-key",
+  "checkpointSchemaId": "connector-checkpoint-v1",
+  "repositories": ["owner/repository"],
+  "resources": ["issues", "milestones", "releases"],
+  "api_base_url": "https://api.github.com",
+  "page_size": 100
+}

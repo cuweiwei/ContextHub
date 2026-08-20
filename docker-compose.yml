@@ -1,7 +1,7 @@
 services:
   contexthub:
     build: .
-    image: contexthub:latest
+    image: ${CONTEXTHUB_IMAGE:-contexthub:latest}
     container_name: contexthub
     restart: unless-stopped
     ports:
@@ -38,8 +38,38 @@ services:
     volumes:
       # SQLite database lives here — back this folder up.
       - ./data:/data
+      # Audit anchors deliberately live outside DATA_DIR and are metadata-only.
+      - ${AUDIT_ANCHOR_DIR:-./audit-anchors}:/audit-anchors
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 5s
       retries: 3
+
+  # Optional, independently restartable workers. They are not started by the
+  # default profile and never mount the authoritative SQLite data directory.
+  github-connector:
+    profiles: ["connectors"]
+    image: contexthub:latest
+    restart: unless-stopped
+    command: ["node", "dist/connectors/github-worker-main.js"]
+    environment:
+      GITHUB_CONNECTOR_CONFIG_FILE: /etc/contexthub/connectors/github.json
+      GITHUB_CONNECTOR_TOKEN_FILE: /run/secrets/github-token
+    volumes:
+      - ./config/connectors/github.json:/etc/contexthub/connectors/github.json:ro
+      - ./secrets/github-token:/run/secrets/github-token:ro
+      - ./secrets/context-hub-connector-key:/run/secrets/context-hub-connector-key:ro
+
+  google-calendar-connector:
+    profiles: ["connectors"]
+    image: contexthub:latest
+    restart: unless-stopped
+    command: ["node", "dist/connectors/google-calendar-worker-main.js"]
+    environment:
+      GOOGLE_CALENDAR_CONNECTOR_CONFIG_FILE: /etc/contexthub/connectors/google-calendar.json
+      GOOGLE_CALENDAR_ACCESS_TOKEN_FILE: /run/secrets/google-calendar-token
+    volumes:
+      - ./config/connectors/google-calendar.json:/etc/contexthub/connectors/google-calendar.json:ro
+      - ./secrets/google-calendar-token:/run/secrets/google-calendar-token:ro
+      - ./secrets/context-hub-connector-key:/run/secrets/context-hub-connector-key:ro

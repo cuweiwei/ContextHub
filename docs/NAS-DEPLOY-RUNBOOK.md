@@ -57,7 +57,23 @@ bash /volume1/docker/contexthub/scripts/nas-deploy.sh \
 
 ## 一次完成部署
 
-Owner 在同一個 NAS SSH terminal 執行；`sudo -v` 與 deploy script 必須在同一個 TTY：
+Owner 在同一個 NAS SSH terminal 執行；`sudo -v` 與 deploy script 必須在同一個 TTY。GitHub
+production workflow 會使用下列 immutable image path；`--ref` 只給 owner 手動 recovery：
+
+```bash
+sudo -v
+bash /usr/local/libexec/contexthub-deploy-engine \
+  --source-dir /volume1/docker/contexthub \
+  --app-dir /volume1/docker/contexthub/v4-ee0e0e2 \
+  --image ghcr.io/cuweiwei/contexthub@sha256:<64-hex-digest> \
+  --expected-commit <full-main-sha> \
+  --expected-version 0.9.0 \
+  --workflow-url https://github.com/cuweiwei/ContextHub/actions/runs/<run-id> \
+  --yes
+```
+
+在 immutable path，script 只 pull 已驗證的 digest，並將 compose 的 image reference 指向該
+digest；不依賴 `latest` 作為部署依據。Owner recovery build 才使用：
 
 ```bash
 sudo -v
@@ -106,6 +122,20 @@ Evidence 位於：
   由 owner 判斷是否因 schema 不相容或 DB 損壞需要使用對應 snapshot。
 - Script **永遠不自動 restore database**；正式 restore 會替換 authoritative SQLite，必須由
   owner 針對 manifest 明確授權，並在 restore 後執行 reindex。
+
+## Synology maintenance tasks
+
+先以唯讀方式盤點既有 Task Scheduler，確認沒有重複 job，再由 owner 建立：
+
+- daily：`scripts/nas-maintenance.sh --app-dir <app-dir> --task daily`（backup + doctor）；
+- weekly：`... --task weekly`（90-day idempotency GC）；
+- monthly：`... --task monthly`（isolated restore drill + audit anchor）。
+
+Compose 將 `/audit-anchors` 綁定到 production app 外的 `audit-anchors/`；anchor 不得放入
+`data/`。通知失敗由服務內的 metadata-only dispatcher 處理，成功不送 Telegram；失敗、
+逾期 backup、projection degraded、磁碟不足與 connector stale 才由 owner-approved
+Telegram subscription 接收。建立或啟用 subscription 前，確認 token/chat-id 是 NAS 上 mode
+`0600` 的檔案，且不存在 raw Memory、query、路徑或 credential。
 
 ## Agent 交付格式
 
