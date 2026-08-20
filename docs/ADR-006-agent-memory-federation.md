@@ -36,7 +36,7 @@ Codex、Claude、Hermes 各自可能保存 local memory。如果 agent local sto
 - 只有有 `claim_key` 的 single-winner claim 能得到強制 conflict exclusion；舊資料需逐步整理，不做不可靠的自動回填。
 - Pointer cache 需要額外的 hub read，不能在離線狀態宣稱內容仍是最新。
 - Conflict 需要 owner/reviewer 裁決；v1 不加入自動 winner policy。
-- 真實 Codex、Claude、Hermes client smoke 與 production deployment 仍是獨立工作，不能由本機 Vitest 取代。
+- 真實 Codex、Claude、Hermes product client smoke 仍是獨立的 `provider_verified` 工作，不能由本機 Vitest 或 production health 取代；NAS release 的 `live_verified` 則必須由 deployment evidence 獨立證明，`0.9.0@3ef8f8c` 已完成此項。
 
 ## Alternatives considered
 

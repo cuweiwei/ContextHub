@@ -1,6 +1,10 @@
 # Agent Memory Federation Protocol v1
 
-Status: `implemented_local`（schema v15、REST/MCP contract 與本機相容性測試已完成）；真實 Codex、Claude、Hermes client 的 `provider_verified` 與 NAS `live_verified` 仍待執行。
+Evidence status:
+
+- `implemented_local`：schema v15、REST/MCP contract 與本機相容性測試已完成。
+- `live_verified`：`0.9.0@3ef8f8ce40a7d2746de31b44b00562d56e38fe20` 已以 immutable digest 部署至 NAS，schema 15、health、reindex、restore drill、doctor 與 rollback evidence 通過。
+- `provider_verified`：真實 Codex、Claude、Hermes product client 的完整 federation smoke 仍待分別執行；不得由本機 MCP SDK 測試或 production health 反推。
 
 Protocol id: `contexthub-agent-memory-federation/v1`
 
@@ -17,7 +21,57 @@ AI agent 內建的 memory 與 ContextHub 不是兩套平行真相。兩者分工
 
 因此，Codex、Claude、Hermes 可以保留各自的 local memory 管理機制，但不得把 local copy 當成比 ContextHub 更新或更可信的共享事實。ContextHub 也不取代 agent runtime 的 system/user instructions、工作目錄規則與即時 tool output。
 
-## 2. Local memory 的三種合法模式
+## 2. Agent 與 ContextHub 的協作原則（normative）
+
+協作時必須把「本次任務怎麼做」與「長期記憶怎麼改」分開。當前使用者可以在不違反 system/security/policy 的前提下指示本次任務採用哪個資訊；這不等於 agent 已獲授權改寫 shared Memory。長期變更仍走 candidate、successor 與 review。
+
+| 層級 | 對本次任務的作用 | 對長期記憶的作用 |
+|---|---|---|
+| System/security、repository rules、namespace policy | 不可繞過的硬限制 | 限制什麼可以讀、寫、審核；本身不因一次對話被改寫 |
+| 當前使用者明確指令 | 在硬限制內主導本次 action | 可成為提案依據，但不會由 agent 自動升格為 accepted Memory |
+| ContextHub accepted Context | 提供跨 session、跨 agent 的受治理背景 | 是 AI shared Memory 的 current surface；版本與裁決留在 hub |
+| Agent local memory | 提供單一 agent/workspace 的局部操作提示 | 永遠不是 shared winner，只能 local-only、pointer 或 candidate staging |
+
+所有相容 agent 必須遵守以下原則：
+
+1. **先取用、後推理**：每個新 session 或新任務先向 ContextHub 取得與 intent 相符的 context，不把模型參數、舊 prompt 或 local cache 當成最新 shared state。
+2. **最小必要揭露**：只編譯本次任務需要、目前 credential 可讀且未失效的內容；不把整個 namespace、完整對話或 Context Package 複製到 local memory。
+3. **保留來源，不洗白 provenance**：來源 app 對原始 domain 負責；ContextHub 對 shared AI Memory 的 acceptance/history 負責；agent 必須保留 `authority`、`source_uri`、trust 與 revision 的差異。
+4. **寫入是提案，不是宣告真理**：agent 新發現的 durable fact、preference 或 decision 以 `save_memory`／`propose_insight` 進入 candidate lifecycle；寫入成功只代表提案被記錄。
+5. **修正走 successor，不覆寫 accepted Memory**：已接受內容過時時，以 `propose_successor` 指向 predecessor；review 前舊 item 仍是 current，接受後才原子 supersede。
+6. **衝突必須顯性、fail-closed**：`conflicts[]` 非空時，不以 local memory、時間、authority 或分數自行選 winner；先查 history/source，必要時依使用者指示完成本次任務，再提出長期修正。
+7. **Local cache 可丟棄**：cache 只保存 pointer metadata；revision、cursor、ACL、revocation 或 successor 改變時重新讀 hub。離線時不得宣稱 cached content 仍是最新。
+8. **Namespace 與 credential 最小權限**：personal/work 使用不同 credential，最好使用不同 profile/process；agent 不得從 payload 指定或跨越 namespace。
+9. **每次 mutation 可安全重試且可稽核**：新的邏輯操作使用新的 UUID；只有 timeout/retry 同一操作才重用 idempotency key。不得把 secret、原始 prompt 或完整內容塞進 log/audit metadata。
+10. **人類裁決閉環**：agent 可以提出、補證據與說明影響，但不得 self-review 或 self-accept；review 結果由 ContextHub 寫回 history，後續所有 agent 重新讀取同一裁決。
+
+共同工作循環如下：
+
+```mermaid
+sequenceDiagram
+  participant U as User
+  participant A as Agent
+  participant H as ContextHub
+  participant R as Owner/Reviewer
+
+  U->>A: 提出本次任務
+  A->>H: compile_context(intent, namespace, budget)
+  H-->>A: accepted context + conflicts[] + provenance
+  alt 沒有未裁決衝突
+    A->>U: 依目前 context 執行或回答
+  else conflicts[] 非空
+    A->>H: get_memory_history + source lookup
+    U->>A: 指定本次任務採用方式（可選）
+    A->>U: 僅在本次任務內採用並揭露衝突
+  end
+  opt 發現值得長期保存或修正的資訊
+    A->>H: save_memory / propose_successor（candidate）
+    R->>H: accept / reject / revoke
+    H-->>A: 下次讀取回傳 accepted / superseded 結果
+  end
+```
+
+## 3. Local memory 的三種合法模式
 
 Agent 必須把每一筆 local memory 分為且只分為下列其中一種：
 
@@ -29,7 +83,7 @@ Agent 必須把每一筆 local memory 分為且只分為下列其中一種：
 
 `cache_pointer` 不得保存 title、content、data、embedding 或完整 Context Package。需要內容時重新向 ContextHub 讀取，讓 ACL、trust、validity、successor 與 revocation 每次都生效。
 
-## 3. Session 與 cache refresh
+## 4. Session 與 cache refresh
 
 Agent 每次建立 ContextHub session 時：
 
@@ -55,7 +109,7 @@ Agent 每次建立 ContextHub session 時：
 }
 ```
 
-## 4. `claim_key` 與單一 current winner
+## 5. `claim_key` 與單一 current winner
 
 只有適合「同一 namespace 中目前應只有一個 winner」的 claim 才加 `claim_key`。格式為 2–12 個 slash-separated `kind:value` segments，NFKC 正規化並轉小寫：
 
@@ -69,7 +123,7 @@ device:gnest/fact:tailscale_address/scope:personal
 
 Schema v15 在 `context_items` 新增 nullable `claim_key`。REST `GET /v1/items?claim_key=...`、`POST /v1/context/compile`、MCP `search_context` 與 `compile_context` 都支援 exact claim filter。
 
-## 5. 衝突處理
+## 6. 衝突處理
 
 若同一 `claim_key` 同時有兩筆以上 active + accepted items，Context Compiler 必須：
 
@@ -100,7 +154,7 @@ Agent 遇到衝突時必須依序：
 4. 需要長期修正時提出 `propose_successor`；不得自行接受。
 5. 由 owner/reviewer 接受 successor、撤銷錯誤 claim，或以其他明確 review 決定完成裁決。
 
-## 6. 相容性矩陣
+## 7. 相容性矩陣
 
 | Target adapter | Session instructions | Cache pointer | Candidate | Successor | Conflict exclusion | Namespace isolation | Evidence |
 |---|---|---|---|---|---|---|---|
@@ -108,11 +162,11 @@ Agent 遇到衝突時必須依序：
 | Claude (`anthropic`) | implemented_local | implemented_local | implemented_local | implemented_local | implemented_local | implemented_local | Vitest + escaped XML adapter |
 | Hermes (`hermes`) | implemented_local | implemented_local | implemented_local | implemented_local | implemented_local | implemented_local | Vitest + MCP HTTP client |
 
-本矩陣的 `implemented_local` 是以官方 MCP SDK client 對本機 ContextHub 執行 contract test，不等於三個產品的正式 client、認證環境與 NAS production 已完成 smoke。`provider_verified` 必須分別用真實 Codex、Claude、Hermes session 重新驗證 initialize、instructions、tools、cache refresh、candidate、successor、conflict 與 personal/work isolation；production 還需符合 deployment runbook 的 `live_verified` 證據。
+本矩陣的 `implemented_local` 是以官方 MCP SDK client 對本機 ContextHub 執行 contract test，不等於三個產品的正式 client 與認證環境已完成 smoke。`provider_verified` 必須分別用真實 Codex、Claude、Hermes session 重新驗證 initialize、instructions、tools、cache refresh、candidate、successor、conflict 與 personal/work isolation。Federation v1 的 NAS release 已取得 deployment runbook 要求的 `live_verified` 證據，但這不會取代各 product client 的 provider verification。
 
 自動化測試位於 `test/agent-memory-federation.test.ts`；migration v15 的 pre-migration snapshot、restore 與 reindex 覆蓋位於 `test/backup-restore.test.ts`。
 
-## 7. 不在 v1 範圍內
+## 8. 不在 v1 範圍內
 
 - 不同步或刪除各產品既有 local memory store。
 - 不把 ContextHub 變成完整 conversation archive。

@@ -3,26 +3,30 @@
 這份文件補足 [NAS Deployment Runbook](NAS-DEPLOY-RUNBOOK.md) 的外部設定。repo 內的
 workflow、manifest、wrapper 與測試已準備好，但 GitHub ruleset、environment、Tailscale
 ACL、NAS SSH key 和 Synology 排程必須由 owner 在各自系統套用；未套用前不得宣稱
-自動部署路徑已 `provider_verified` 或 production 已 `live_verified`。
+**自動部署路徑**已 `provider_verified`。Owner 仍可在自己的 NAS SSH/sudo session 直接執行
+root-owned deploy engine；只有該次精確 digest 的完整 evidence 通過時，該 release 才可個別標成
+`live_verified`。
 
 ## Current evidence snapshot
 
-截至 2026-08-20，[main CI run 32324323535](https://github.com/cuweiwei/ContextHub/actions/runs/32324323535)
-已對 `0.9.0@4c3a09a35348cc319316226a1c0691bf1d7cfad5` 完成全部 gates，並產生：
+截至 2026-08-20，[main CI run 32332161336](https://github.com/cuweiwei/ContextHub/actions/runs/32332161336)
+已對 `0.9.0@3ef8f8ce40a7d2746de31b44b00562d56e38fe20` 完成全部 gates，並產生：
 
 - GHCR `linux/amd64` immutable digest
-  `sha256:eb682cdd47e92c5569e0e9a58b4ea795c0687d4c6aeea1fc2a179163b2abd3af`；
-- `contexthub-sbom-32324323535`；
+  `sha256:a0517f05990a2419269bb210fd7c9bd23dc666242c9413f53fc0084114f49e45`；
+- `contexthub-sbom-32332161336`；
 - GitHub build provenance attestation；
 - `ReleaseManifestV1`，其 version、commit、digest、CI URL 與 provenance subject 已交叉驗證。
 
 GHCR manifest 可讀取，`gh attestation verify` 已通過，所以 immutable release 本身已
-`provider_verified`。Production 的 8788 與 8443 `/health` 目前也回報相同 version／commit、
-schema 14、audit writable 與 projection ready。但 GitHub 尚無 `production` environment，也無
-`ContextHub production deploy` workflow run；因此無法證明 running image digest，也沒有同一次
-deployment 的 backup manifest、restore drill、doctor、rollback image 與 `DEPLOYMENT VERIFIED`
-evidence。這些都完成前，production 仍是「服務與 commit 已觀察、正式
-`live_verified` 尚未完成」。
+`provider_verified`。Owner 已透過 root-owned NAS deploy engine 部署相同 digest；該次
+`DeploymentEvidenceV1` 記錄 backup manifest、schema 15、37/37 retrieval coverage、8788／8443
+health、isolated restore drill、doctor、rollback image 與 `DEPLOYMENT VERIFIED`，因此這個 release
+已 `live_verified`。
+
+GitHub 目前仍無 `production` environment，也沒有 `ContextHub production deploy` workflow run；
+所以以上證據只證明 owner-authorized manual production path 與該次 running release，不代表
+GitHub Actions 自動部署路徑已 `provider_verified`。
 
 ## GitHub repository settings
 

@@ -30,6 +30,18 @@ Local cache 不應複製整份長期記憶，只記 item id、revision、change 
 
 若 ContextHub 發現同一個「應該只有一個目前答案」的事實有兩筆已接受版本，會把兩筆都暫時排除並告訴 AI 有 conflict。AI 不可自己選較新的一筆；它應查來源與歷史，遵照你對眼前任務的明確指示，再提出 successor 讓你審核。完整技術規則見 [Agent Memory Federation Protocol v1](AGENT-MEMORY-FEDERATION.md)。
 
+### AI 與 ContextHub 實際怎麼合作？
+
+一次正常的合作循環是：
+
+1. 你交代任務後，AI 先向 ContextHub 取得這次真正需要、且它有權讀取的 context。
+2. ContextHub 只提供目前有效的 accepted Memory，並附來源與版本；有未裁決衝突就明確列出，不替你猜答案。
+3. AI 依你的當前指示完成本次工作。你的這次指示不會被 AI 自動改成永久記憶。
+4. AI 若發現值得跨對話保存的新資訊，只能建立待審核提案；若舊記憶已過時，則提出 successor。
+5. 你在 review 流程接受、拒絕或撤銷後，ContextHub 保存裁決歷史；Codex、Claude、Hermes 下次讀取時看到同一結果。
+
+簡單說：**AI 負責讀取、推理與提案；ContextHub 負責權限、版本、共享與裁決紀錄；你負責決定什麼能成為長期共用記憶。** Personal 與 work 仍是兩個獨立範圍，不會因為同一個 AI 同時使用兩者就自動混合。
+
 ## 2. 開始前要準備什麼
 
 你需要：

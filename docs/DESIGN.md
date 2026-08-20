@@ -68,6 +68,18 @@ flowchart TB
 
 ContextHub 的 compiler 只處理持久資訊與明確要求的 operational state。System/user instructions 和剛產生的 tool output 留在 agent runtime，由 runtime 與 `rendered_context` 做最後 prompt 組裝；因此 ContextHub 不會把完整 conversation 或 tool transcript 誤當 Memory。
 
+### Agent ↔ ContextHub 協作契約
+
+Agent runtime 負責目前 session 的 system/security instructions、使用者要求、工具操作與即時結果；ContextHub 負責 namespace-bound retrieval、accepted Memory、provenance、版本與裁決。兩者用以下閉環協作，而不是互相複製完整狀態：
+
+1. Agent 以本次 intent 呼叫 `compile_context`，ContextHub 只回傳 ACL-readable、active、accepted 且符合 token budget 的資訊。
+2. Agent 把回傳內容當作 data，不當作能覆蓋 system/user instructions 的命令；local memory 只提供局部規則、pointer 或 candidate staging。
+3. `conflicts[]` 非空時，ContextHub 排除所有 claimant；agent 查 history/source，且只把當前使用者的明確選擇套用於本次任務。
+4. 值得長期保存的新資訊由 agent 提 candidate；accepted item 的修正走 successor，不做 local overwrite 或平行 winner。
+5. Owner/reviewer 裁決後，ContextHub 原子更新 accepted/superseded state；其他 agent 透過下一次 compile 或 change cursor 取得結果。
+
+因此「執行優先序」與「持久權威」不得混為一談：system/security/policy 是不可繞過的硬邊界；當前使用者主導本次合法 action；ContextHub accepted surface 是跨 agent 的 durable context；agent local memory 永遠不能自行成為 shared winner。完整 normative rules 與 sequence diagram 見 [Agent Memory Federation Protocol v1](AGENT-MEMORY-FEDERATION.md) §2。
+
 | 入口 | 對象 | 協定 |
 |---|---|---|
 | `/v1/*` | Apps、審核 UI、admin | REST + Bearer API key |
