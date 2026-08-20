@@ -61,6 +61,8 @@ jobs:
         run: npm ci
       - name: Retrieval regression gate
         run: npm run benchmark:retrieval -- --items=2000
+      - name: Build browser target
+        run: npm run build
       - name: Install Chromium only
         run: npx playwright install chromium
       - name: Browser smoke
