@@ -403,6 +403,7 @@ const REVIEW_HTML = String.raw`<!doctype html>
           addFact("Successor of", selected.successor_of || "—");
           addFact("資訊角色", selected.information_class || "—");
           addFact("Memory 類型", selected.memory_kind || "—");
+          addFact("Claim key", selected.claim_key || "—");
           addFact("最後驗證", formatTime(selected.last_verified_at));
           renderQualityWarnings(selected);
           byId("content").textContent = selected.content || "（無內容）";

@@ -443,6 +443,7 @@ const EXPLORE_HTML = String.raw`<!doctype html>
         addFact("生命週期", item.status);
         addFact("資訊角色", item.information_class);
         addFact("Memory 類型", item.memory_kind);
+        addFact("Claim key", item.claim_key);
         addFact("有效起點", formatTime(item.valid_from));
         addFact("有效終點", formatTime(item.valid_until));
         addFact("最後驗證", formatTime(item.last_verified_at));

@@ -782,6 +782,16 @@ const MIGRATIONS: {
       );
     `,
   },
+  {
+    version: 15,
+    name: 'agent-memory-federation-claims',
+    sql: `
+      ALTER TABLE context_items ADD COLUMN claim_key TEXT;
+      CREATE INDEX idx_items_claim_current
+        ON context_items(namespace, claim_key, trust_state, status)
+        WHERE claim_key IS NOT NULL AND deleted = 0;
+    `,
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

@@ -48,7 +48,12 @@ describe('backup / restore / reindex on a real file database', () => {
     const hermes = s.clientsRepo.verifyKey(apiKey)!;
     const saved = s.commands.createMemory(
       hermes,
-      newItemSchema.parse({ type: 'fact', title: '財務規劃長期記憶', idempotency_key: 'seed-1' }),
+      newItemSchema.parse({
+        type: 'fact',
+        title: '財務規劃長期記憶',
+        claim_key: 'user:tim/fact:financial_planning_baseline/scope:personal',
+        idempotency_key: 'seed-1',
+      }),
     );
     s.commands.reviewMemory(ADMIN_CLIENT, saved.item.id, { decision: 'accept', expectedRevision: 1 }, idem());
 
@@ -65,6 +70,7 @@ describe('backup / restore / reindex on a real file database', () => {
     // everything survived: item + trust + versions + reviews + policy + audit + idempotency
     const item = r.itemsRepo.get(ADMIN_ACCESS, saved.item.id)!;
     expect(item.trust_state).toBe('accepted');
+    expect(item.claim_key).toBe('user:tim/fact:financial_planning_baseline/scope:personal');
     const found = r.itemsRepo.search(ADMIN_ACCESS, { queries: ['財務'], limit: 10, surface: 'accepted' });
     expect(found.totalMatched).toBe(1);
     const history = r.itemsRepo.history(ADMIN_ACCESS, saved.item.id)!;
@@ -90,7 +96,7 @@ describe('backup / restore / reindex on a real file database', () => {
     // reopen: no pending migrations → no error, no extra backup
     const db2 = openDatabase(dbFile);
     const migrations = db2.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get() as { n: number };
-    expect(migrations.n).toBe(14);
+    expect(migrations.n).toBe(15);
     db2.close();
     const backups = fs.existsSync(path.join(dir, 'backups')) ? fs.readdirSync(path.join(dir, 'backups')) : [];
     expect(backups.filter((f) => f.startsWith('pre-migration'))).toHaveLength(0); // fresh DB → no upgrade backup
@@ -159,6 +165,51 @@ describe('backup / restore / reindex on a real file database', () => {
     restoredRepo.reindex();
     expect(restoredRepo.retrievalProjectionStatus()).toMatchObject({ ready: true, indexed_items: 1 });
     expect(restoredRepo.get(ADMIN_ACCESS, saved.id)?.title).toBe('migration vector recovery marker');
+    restored.close();
+  });
+
+  it('snapshots a v14 database before claim migration v15 and restores plus reindexes it', () => {
+    const dbFile = path.join(dir, 'claim-upgrade.db');
+    const db = openDatabase(dbFile);
+    const repo = createItemsRepo(db);
+    const saved = repo.insert(
+      writerFor('claim-upgrade-source'),
+      newItemSchema.parse({
+        type: 'preference',
+        memory_kind: 'preference',
+        title: 'v14 restore marker',
+        idempotency_key: 'claim-upgrade-marker',
+      }),
+      'app',
+      ACCEPT_TRUST,
+    ).item;
+    db.exec(`
+      DROP INDEX idx_items_claim_current;
+      ALTER TABLE context_items DROP COLUMN claim_key;
+      DELETE FROM schema_migrations WHERE version = 15;
+    `);
+    db.close();
+
+    const upgraded = openDatabase(dbFile);
+    const upgradeBackups = fs
+      .readdirSync(path.join(dir, 'backups'))
+      .filter((name) => name.startsWith('pre-migration-v15-'));
+    expect(upgradeBackups).toHaveLength(1);
+    expect(
+      upgraded.prepare("SELECT COUNT(*) AS n FROM pragma_table_info('context_items') WHERE name = 'claim_key'").get(),
+    ).toEqual({ n: 1 });
+    upgraded.close();
+
+    const restoredFile = path.join(dir, 'restored-v14.db');
+    fs.copyFileSync(path.join(dir, 'backups', upgradeBackups[0]!), restoredFile);
+    const restored = openDatabase(restoredFile);
+    const restoredRepo = createItemsRepo(restored);
+    restoredRepo.reindex();
+    expect(restoredRepo.get(ADMIN_ACCESS, saved.id)).toMatchObject({
+      title: 'v14 restore marker',
+      claim_key: null,
+    });
+    expect(restoredRepo.retrievalProjectionStatus().ready).toBe(true);
     restored.close();
   });
 

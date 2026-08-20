@@ -14,7 +14,10 @@
 [docs/ADR-003](docs/ADR-003-hybrid-memory-retrieval.md)；Control Center 認證決策見
 [docs/ADR-004](docs/ADR-004-control-center-auth.md)；0.9.0 的 P1/P2 治理與整合決策見
 [docs/ADR-005](docs/ADR-005-p1-p2-integrations.md)，新增介面摘要見
-[docs/P1-P2-API.md](docs/P1-P2-API.md)。
+[docs/P1-P2-API.md](docs/P1-P2-API.md)；AI 產品自身 memory 與 ContextHub 的協作、
+cache pointer、`claim_key` 與衝突規則見
+[Agent Memory Federation Protocol v1](docs/AGENT-MEMORY-FEDERATION.md) 與
+[ADR-006](docs/ADR-006-agent-memory-federation.md)。
 
 ```mermaid
 flowchart TB
@@ -31,6 +34,7 @@ flowchart TB
   CC["Context Compiler<br/>authority/freshness ranking · validity<br/>dedup · token budget · target formatting"]
   PKG["Ephemeral Context Package<br/>not stored as memory"]
   AGENTS["AI agents<br/>ChatGPT · Claude · Codex · Cursor · Hermes"]
+  LOCAL["Agent local memory<br/>local_only · cache_pointer · shared_candidate<br/>never shared authority"]
   ACTION["Action"]
   OUTCOME["Outcome feedback<br/>ids + coarse labels only"]
   FORM["Memory formation<br/>observe · extract · classify · score · propose<br/>review · consolidate · update · supersede/forget"]
@@ -41,9 +45,13 @@ flowchart TB
   POLICY --> RET --> CC
   POLICY --> FORM
   CC --> PKG --> AGENTS --> ACTION --> OUTCOME --> FORM --> MEM
+  AGENTS <--> LOCAL
+  LOCAL -.->|"pointer only; refresh by revision/cursor"| MEM
 ```
 
 Agent runtime 仍負責 system/user instructions 與即時 tool output 的最後 prompt 組裝；ContextHub 的 `compile_context` 專注於持久來源、Memory 與明確授權的 operational state，不保存 task text 或編譯結果。
+
+Agent 內建 memory 與 ContextHub 不是兩個平行真相：local memory 只負責單一 agent/workspace 的局部規則、metadata pointer 或尚待送審的 candidate；跨 Codex、Claude、Hermes 共用的長期記憶以 ContextHub accepted surface 為準。Local cache 不複製完整內容，只保存 `hub_item_id`、`revision`、`change_cursor`、`cached_at`；遇到同一 `claim_key` 多個 accepted winner 時，compiler 回傳 `conflicts[]` 並排除全部 claimant，不靜默挑選。
 
 ## 本機開發
 
@@ -167,15 +175,15 @@ docker exec contexthub node dist/cli.js web-principal-link \
 
 管理頁網址是 `https://<nas-tailscale-name>:8443/dashboard`；請使用 Tailscale DNS 名稱，不要用 `https://<tailscale-ip>:8443` 取代，因為 HTTPS 憑證與 identity proxy 都以 tailnet hostname 為準。只有在 Tailscale HTTPS reverse proxy 已配置後才開啟 `CONTROL_CENTER_ENABLED=true`、`CONTROL_CENTER_TAILSCALE_AUTH_ENABLED=true`、`CONTROL_CENTER_TRUSTED_PROXY=true`，並填入 `CONTROL_CENTER_CANONICAL_ORIGIN=https://<tailnet-host>:8443`。Enrollment 預設關閉；開啟 `AGENT_ENROLLMENT_ENABLED=true` 後，Agents 頁面可產生 single-use code，agent 透過 `/v1/agent-enrollment/exchange` 取得一次性 raw key。MCP OAuth 已有 protected-resource 驗證接縫，但未經真實 issuer/客戶端實測不宣稱 live 支援；`LEGACY_API_KEYS_ENABLED=true` 是相容 fallback。
 
-21 個工具。讀取面：`compile_context`（依 intent、有效期、authority/freshness、ACL 與 token budget 產生短暫 package）、`search_context`（預設 hybrid：FTS5 + 本地向量 + structured entity，weighted RRF；結果帶 retrieval diagnostics、information_class/memory_kind/authority/trust_state）、`curation_suggestions`（只讀的 duplicate/conflict/stale/expired working_state 建議）、`get_changes`、`traverse_entity_graph`、`get_current_context`、`get_recent_context`、`get_context_item`、`get_context_brief`、`list_context_sources`、`get_memory_history`（版本＋裁決史）、`my_candidates`（自己的待審）。
+21 個工具。讀取面：`compile_context`（依 intent、有效期、authority/freshness、ACL、single-winner conflict 與 token budget 產生短暫 package）、`search_context`（預設 hybrid：FTS5 + 本地向量 + structured entity，weighted RRF；結果帶 retrieval diagnostics、information_class/memory_kind/claim_key/authority/trust_state）、`curation_suggestions`（只讀的 duplicate/conflict/stale/expired working_state 建議）、`get_changes`（Federation v1 metadata-only cache pointers）、`traverse_entity_graph`、`get_current_context`、`get_recent_context`、`get_context_item`、`get_context_brief`、`list_context_sources`、`get_memory_history`（版本＋裁決史）、`my_candidates`（自己的待審）。
 
-`search_context` 與 `compile_context` 支援 `information_classes`、`memory_kinds`、`entity_filters` 硬過濾；`entities` 仍是 query-time boost。REST `GET /v1/items` 對應 `information_class`、`memory_kind`、`entity_exact`。Tags 與 entities 會以 NFKC、空白、大小寫及重複值正規化；`context_items` 仍是唯一權威，`item_tag_index`／`item_entity_index` 是 migration v9 建立的可重建 projection。
+`search_context` 與 `compile_context` 支援 `information_classes`、`memory_kinds`、`claim_keys`、`entity_filters` 硬過濾；`entities` 仍是 query-time boost。REST `GET /v1/items` 對應 `information_class`、`memory_kind`、`claim_key`、`entity_exact`。Tags、entities 與 claim keys 會正規化；`context_items` 仍是唯一權威，`item_tag_index`／`item_entity_index` 是 migration v9 建立的可重建 projection。
 
 v6 的 `local-feature-hash-v1` 是完全本地、同步、可重現的 384 維 similarity embedding，擅長 typo／字形近似與欄位加權；它不宣稱具備大型神經模型的同義詞理解。embedding provider 可替換成另一個同步 on-device model，而 ACL、domain rows 與 API 不需改變。`item_embeddings`、FTS 與 normalized tag/entity facets 都只是 projection；SQLite `context_items` 仍是唯一權威。
 
 記憶與回饋生命週期：`save_memory`（必須明確標記 fact／preference／decision／experience／procedure／relationship／working_state）、`propose_insight`（推論＋evidence）、`revise_my_candidate`、`propose_successor`（取代過時的 accepted Memory，裁決原子寫回）、`record_context_outcome`（只記 context 是否改變行動及粗粒度結果）、`operate_task`、`curate_note`、`update_operational_state`／`get_operational_state`（exact-key 狀態槽）。
 
-`context_items.information_class` 由 server 決定為 `source / memory / task_state`；`memory_kind`、`valid_from / valid_until`、`last_verified_at`、`decay_policy` 描述 Memory 的語意與生命週期。`valid_until`／`expires_at` 已過或尚未到 `valid_from` 的項目，不進任何 list/search/compiler 讀取面。
+`context_items.information_class` 由 server 決定為 `source / memory / task_state`；`memory_kind`、`valid_from / valid_until`、`last_verified_at`、`decay_policy` 描述 Memory 的語意與生命週期。Migration v15 的 nullable `claim_key` 標示適合單一 current winner 的 claim；未裁決重複 accepted claim 會全部退出 compiler sections。`valid_until`／`expires_at` 已過或尚未到 `valid_from` 的項目，不進任何 list/search/compiler 讀取面。
 
 所有 mutation 必帶 `idempotency_key`(UUID)——timeout 重試安全,同 key 回原結果。
 
@@ -218,9 +226,9 @@ src/
            #   history/audit/policies/clients/namespaces/changes/connectors/entities/migrations)
            #   + /explore + /review + Control Center + health
   mcp/     # MCP server(21 tools)+ Streamable HTTP 掛載(stateless,一 key 一 namespace)
-  db/      # SQLite+sqlite-vec 連線(synchronous=FULL、instance lock)+ migrations(v1–v14)
+  db/      # SQLite+sqlite-vec 連線(synchronous=FULL、instance lock)+ migrations(v1–v15)
   cli.ts   # client/policy/review/audit/OAuth/namespace portability/reindex/backup/restore/...
 scripts/   # e2e/retrieval、release manifest、upgrade gate、NAS deploy/maintenance
 test/      # 100+ tests:隔離/信任/政策/稽核 fail-closed/idempotency/一致性/還原邊界
-docs/      # USER/AGENT/CODEX guides、DESIGN、ADR-001–005、API 與 deployment runbooks
+docs/      # USER/AGENT/CODEX guides、Federation v1、DESIGN、ADR-001–006、API 與 deployment runbooks
 ```

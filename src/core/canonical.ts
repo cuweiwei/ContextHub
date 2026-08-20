@@ -52,6 +52,46 @@ export function normalizeEntity(value: string): string {
   return identifier ? `${kind}:${identifier}` : kind;
 }
 
+/**
+ * Canonical identifier for a fact that is expected to have one current
+ * winner inside a namespace. Claim keys are semantic coordination metadata,
+ * never an authorization input. The slash-separated `kind:value` segments
+ * make scope explicit, for example:
+ * `user:tim/preference:response_language/scope:contexthub`.
+ */
+export function normalizeClaimKey(value: string): string {
+  return value
+    .normalize('NFKC')
+    .split('/')
+    .map((rawSegment) => {
+      const segment = rawSegment.trim().replace(/\s+/g, '_');
+      const separator = segment.indexOf(':');
+      if (separator < 1) return segment.toLowerCase();
+      const kind = segment.slice(0, separator).trim().toLowerCase();
+      const identifier = segment.slice(separator + 1).trim().toLowerCase();
+      return `${kind}:${identifier}`;
+    })
+    .filter(Boolean)
+    .join('/');
+}
+
+export function isValidClaimKey(value: string): boolean {
+  const normalized = normalizeClaimKey(value);
+  if (normalized.length < 3 || normalized.length > 500) return false;
+  const segments = normalized.split('/');
+  if (segments.length < 2 || segments.length > 12) return false;
+  return segments.every((segment) => {
+    const separator = segment.indexOf(':');
+    if (separator < 1) return false;
+    const kind = segment.slice(0, separator);
+    const identifier = segment.slice(separator + 1);
+    return /^[a-z][a-z0-9_-]{0,63}$/.test(kind) &&
+      identifier.length > 0 &&
+      identifier.length <= 200 &&
+      !/[\u0000-\u001f\u007f/]/u.test(identifier);
+  });
+}
+
 export function canonicalTags(values: readonly string[]): string[] {
   return [...new Set(values.map(normalizeTag).filter(Boolean))].sort();
 }

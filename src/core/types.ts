@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isValidClaimKey, normalizeClaimKey } from './canonical.js';
 
 /** Accepts anything Date.parse understands and normalizes to UTC ISO 8601. */
 export const isoDateTime = z
@@ -77,6 +78,18 @@ export type MemoryKind = (typeof MEMORY_KINDS)[number];
 export const DECAY_POLICIES = ['none', 'standard', 'rapid'] as const;
 export type DecayPolicy = (typeof DECAY_POLICIES)[number];
 
+export const AGENT_LOCAL_MEMORY_MODES = ['local_only', 'cache_pointer', 'shared_candidate'] as const;
+export type AgentLocalMemoryMode = (typeof AGENT_LOCAL_MEMORY_MODES)[number];
+
+export const claimKeySchema = z
+  .string()
+  .min(3)
+  .max(500)
+  .refine(isValidClaimKey, {
+    message: 'claim_key must contain 2-12 slash-separated kind:value segments',
+  })
+  .transform(normalizeClaimKey);
+
 /**
  * Item types are conventions, not an enum — writers may introduce their own,
  * subject to the namespace policy's create_rules. Documented conventions:
@@ -103,6 +116,12 @@ export const newItemSchema = z.object({
   valid_until: isoDateTime.optional(),
   last_verified_at: isoDateTime.optional(),
   decay_policy: z.enum(DECAY_POLICIES).optional(),
+  /**
+   * Optional canonical identity for a claim that should have one current
+   * accepted winner. Multiple active accepted rows with the same claim_key
+   * are an unresolved conflict and are excluded from compiled context.
+   */
+  claim_key: claimKeySchema.optional(),
   /**
    * Evidence for insights: ids of the NON-insight context items this
    * inference is based on. Must live in the writer's namespace.
@@ -147,6 +166,7 @@ export const patchItemSchema = z
     valid_until: isoDateTime.nullable(),
     last_verified_at: isoDateTime.nullable(),
     decay_policy: z.enum(DECAY_POLICIES).nullable(),
+    claim_key: claimKeySchema.nullable(),
     source_uri: safeSourceUri.nullable(),
     expected_revision: z.number().int().min(1),
   })
@@ -183,6 +203,7 @@ export interface ContextItem {
   valid_until: string | null;
   last_verified_at: string | null;
   decay_policy: DecayPolicy | null;
+  claim_key: string | null;
   source_item_id: string | null;
   source_uri: string | null;
   revision: number;
@@ -210,6 +231,7 @@ export interface CompactItem {
   trust_state: TrustState;
   information_class: InformationClass;
   memory_kind: MemoryKind | null;
+  claim_key: string | null;
   confidence: number | null;
   occurred_at: string | null;
   created_at: string;
@@ -238,6 +260,8 @@ export interface ListFilters {
   /** Exact semantic role filters; unlike query inference these are hard filters. */
   information_classes?: InformationClass[];
   memory_kinds?: MemoryKind[];
+  /** Exact canonical single-winner claim identities. */
+  claim_keys?: string[];
   /** Exact canonical entity identifiers, e.g. project:contexthub. */
   entity_filters?: string[];
   statuses?: ItemStatus[];

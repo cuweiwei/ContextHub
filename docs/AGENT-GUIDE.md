@@ -39,6 +39,16 @@ Enrollment 是目前的相容方案。MCP OAuth 仍是 feature-flagged pilot，�
 7. Work namespace 禁止存入 email／Teams／會議逐字稿原文、PII、客戶資料、未公開財務資訊與機密技術細節。
 8. Memory 是持久的；Context Package 是一次性的。不可把 `compile_context` 回傳內容整包再存成 Memory。
 
+### Agent 自身 memory 與 ContextHub 的關係
+
+遵守 `contexthub-agent-memory-federation/v1`。Agent local memory 只能是：
+
+- `local_only`：只對目前 agent／workspace 有效，不宣稱是跨 agent 事實。
+- `cache_pointer`：只保存 `hub_item_id`、`revision`、`change_cursor`、`cached_at`，不得複製完整長期 Memory。
+- `shared_candidate`：值得跨 agent 保存的提案，必須送進 ContextHub candidate/review lifecycle。
+
+ContextHub accepted Memory 是跨 Codex、Claude、Hermes 的 shared authority；local memory 只是提示或快取。來源 app 仍是其原始 domain 的 system of truth。完整 contract 見 [Agent Memory Federation Protocol v1](AGENT-MEMORY-FEDERATION.md)。
+
 ## 3. 每次工作的標準流程
 
 ### 第一次接觸某個 ContextHub 連線
@@ -46,6 +56,7 @@ Enrollment 是目前的相容方案。MCP OAuth 仍是 feature-flagged pilot，�
 1. 呼叫 `list_context_sources`，了解這個 namespace 有哪些來源與資料類型。
 2. 有明確 task／decision 時，優先呼叫 `compile_context`，提供合理 `token_budget` 與目標 agent；一般 catch-up 才用 `get_context_brief`。
 3. 如果需要更多精確證據或歷史，再呼叫 `search_context`。
+4. 若 local cache 有 cursor，呼叫 `get_changes(after=<cursor>)`；只更新 pointer，需要內容時重新讀 hub，並保存 `next_cursor`。
 
 不要在每一句話前重複讀取。一次工作先讀 brief，遇到需要精確證據的主題再搜尋即可。
 
@@ -57,6 +68,8 @@ Enrollment 是目前的相容方案。MCP OAuth 仍是 feature-flagged pilot，�
 - 「搜尋某個人物／專案／偏好」：`search_context`
 - 「需要完整內容」：先從搜尋結果取得 id，再用 `get_context_item`
 - 「為何這筆記憶成立、被誰接受或如何改過」：`get_memory_history`
+
+如果 `compile_context.conflicts[]` 非空，不得從 local memory、freshness 或 score 猜 winner。先查每個 item 的 history/source；遵照使用者目前的明確指令完成本次任務，但 durable correction 必須提出 successor，且 agent 不得自行接受。衝突 claimant 已從 `sections` 與 model-facing facts 排除。
 
 引用記憶時要保留來源判讀：
 
@@ -88,7 +101,8 @@ Enrollment 是目前的相容方案。MCP OAuth 仍是 feature-flagged pilot，�
 4. 使用簡短 title、完整但精煉的 content，以及可搜尋的 tags／entities；tags 會正規化，entity 建議使用穩定的 `<kind>:<canonical-id>`（例如 `project:contexthub`）。
 5. `save_memory` 必須明確選擇 `memory_kind`：fact／preference／decision／experience／procedure／relationship／working_state；來源 app 的一般 projection 應省略。
 6. 時效資訊應填 `valid_from`／`valid_until`；只有明確重新核對時才填 `last_verified_at`。`decay_policy` 影響 ranking，不等於刪除。
-7. 使用 `my_candidates` 確認寫入結果與待審狀態。
+7. 適合單一 current winner 的事實／偏好／決策加上 canonical `claim_key`，例如 `user:tim/preference:response_language/scope:contexthub`；可並存的事件、交易、經驗不要加。
+8. 使用 `my_candidates` 確認寫入結果與待審狀態。
 
 建議欄位：
 
@@ -98,6 +112,7 @@ Enrollment 是目前的相容方案。MCP OAuth 仍是 feature-flagged pilot，�
   "memory_kind": "preference",
   "title": "網路變更前先做唯讀檢查",
   "content": "使用者偏好先區分公網 IP 與 NAS LAN IP，未經明確授權不得套用、重開機或拔線。",
+  "claim_key": "user:tim/preference:network_change_safety/scope:personal",
   "tags": ["network", "nas", "change-safety"],
   "entities": ["device:gnest"],
   "sensitivity": "normal",

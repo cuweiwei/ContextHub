@@ -32,11 +32,16 @@ import {
 } from './context-compiler.js';
 import { ulid } from './ids.js';
 import { expandCjkQueries } from './cjk-variants.js';
+import { normalizeClaimKey } from './canonical.js';
 import { assertAllowedWebhook, deriveWebhookSecret, enqueueChangeNotification } from './notifications.js';
 import { rebuildEntityGraph, traverseEntityGraph } from './entity-graph.js';
 import { rebuildConsolidationQueue, suggestionDigest } from './consolidation.js';
 import { createCampaign, migrationCampaignStatus, upsertCampaignSource } from './migration-campaigns.js';
 import { operationalAuditReport } from './audit-report.js';
+import {
+  AGENT_MEMORY_FEDERATION_CONTRACT,
+  cachePointerForChange,
+} from './agent-memory-federation.js';
 import {
   accessFor,
   resolveAuthority,
@@ -184,14 +189,22 @@ export function createCommands(deps: CommandDeps) {
   function readAudited<T>(
     client: ClientAuth,
     action: string,
-    requiredCap: Capability | null,
+    requiredCap: Capability | readonly Capability[] | null,
     details: Record<string, unknown>,
     fn: (ctx: AuthzContext) => T,
   ): T {
     let ctx: AuthzContext;
     try {
       ctx = resolveAuthz(client);
-      if (requiredCap) requireCap(ctx, requiredCap);
+      if (Array.isArray(requiredCap)) {
+        if (!requiredCap.some((capability) => has(ctx, capability))) {
+          throw new PolicyDeniedError(
+            `this operation requires one of [${requiredCap.map((capability) => `"${capability}"`).join(', ')}] in namespace policy`,
+          );
+        }
+      } else if (requiredCap) {
+        requireCap(ctx, requiredCap as Capability);
+      }
     } catch (err) {
       if (err instanceof PolicyDeniedError) {
         auditRepo.logDenySafe({
@@ -529,6 +542,7 @@ export function createCommands(deps: CommandDeps) {
           ...('valid_until' in patch ? { valid_until: patch.valid_until } : {}),
           ...('last_verified_at' in patch ? { last_verified_at: patch.last_verified_at } : {}),
           ...('decay_policy' in patch ? { decay_policy: patch.decay_policy } : {}),
+          ...('claim_key' in patch ? { claim_key: patch.claim_key } : {}),
           expected_revision: patch.expected_revision,
         };
         const item = itemsRepo.update(itemId, allowed, ctx.client.id);
@@ -949,6 +963,27 @@ export function createCommands(deps: CommandDeps) {
           score: scoreById.get(item.id) ?? 0,
           retrieval_sources: sourcesById.get(item.id) ?? [],
         }));
+        const claimScores = new Map<string, number>();
+        for (const claimKey of opts.filters?.claim_keys ?? []) {
+          claimScores.set(normalizeClaimKey(claimKey), 1);
+        }
+        for (const candidate of candidates) {
+          if (!candidate.item.claim_key) continue;
+          claimScores.set(
+            candidate.item.claim_key,
+            Math.max(claimScores.get(candidate.item.claim_key) ?? 0, candidate.score),
+          );
+        }
+        const knownIds = new Set(candidates.map((candidate) => candidate.item.id));
+        for (const peer of itemsRepo.claimPeers(ctx.access, [...claimScores.keys()], opts.filters)) {
+          if (knownIds.has(peer.id)) continue;
+          candidates.push({
+            item: peer,
+            score: claimScores.get(peer.claim_key ?? '') ?? 0,
+            retrieval_sources: [],
+          });
+          knownIds.add(peer.id);
+        }
 
         for (const stateKey of new Set(opts.stateKeys ?? [])) {
           requireCap(ctx, 'state.read');
@@ -1264,15 +1299,31 @@ export function createCommands(deps: CommandDeps) {
   }
 
   function changes(client: ClientAuth, opts: { after?: number; limit?: number } = {}) {
-    return readAudited(client, 'read.changes', client.isAdmin ? null : 'change.read', { after: opts.after ?? 0, limit: opts.limit ?? 100 }, (ctx) => {
+    return readAudited(client, 'read.changes', client.isAdmin ? null : ['memory.read_accepted', 'change.read'], { after: opts.after ?? 0, limit: opts.limit ?? 100 }, (ctx) => {
       const limit = Math.min(1000, Math.max(1, opts.limit ?? 100));
       const after = Math.max(0, opts.after ?? 0);
       const namespace = ctx.client.isAdmin ? undefined : ctx.client.namespace;
       const rows = namespace
         ? db.prepare('SELECT cursor, namespace, action, entity_kind, entity_id, revision, occurred_at FROM change_events WHERE namespace = ? AND cursor > ? ORDER BY cursor LIMIT ?').all(namespace, after, limit)
         : db.prepare('SELECT cursor, namespace, action, entity_kind, entity_id, revision, occurred_at FROM change_events WHERE cursor > ? ORDER BY cursor LIMIT ?').all(after, limit);
-      const events = rows as Array<{ cursor: number; namespace: string; action: string; entity_kind: string; entity_id: string; revision: number | null; occurred_at: string }>;
-      return { events, next_cursor: events.at(-1)?.cursor ?? after };
+      const scannedEvents = rows as Array<{ cursor: number; namespace: string; action: string; entity_kind: string; entity_id: string; revision: number | null; occurred_at: string }>;
+      const events = ctx.client.isAdmin || has(ctx, 'change.read')
+        ? scannedEvents
+        : scannedEvents.filter(
+            (event) => event.entity_kind === 'context_item' && itemsRepo.changeVisible(ctx.access, event.entity_id),
+          );
+      const generatedAt = new Date().toISOString();
+      return {
+        protocol: AGENT_MEMORY_FEDERATION_CONTRACT,
+        generated_at: generatedAt,
+        events: events.map((event) => ({
+          ...event,
+          cache_pointer: cachePointerForChange(event, generatedAt),
+        })),
+        // Advance past every scanned event, including an invisible candidate,
+        // so a restricted client cannot get stuck rereading the same page.
+        next_cursor: scannedEvents.at(-1)?.cursor ?? after,
+      };
     });
   }
 
