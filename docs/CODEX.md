@@ -5,6 +5,8 @@ ContextHub is a remote MCP server used by Codex; Codex project guidance and Cont
 - `AGENTS.md` tells Codex how to work in this repository.
 - ContextHub MCP tools provide source projections, governed durable memory, and ephemeral task-specific context for a single namespace.
 
+Codex local memory is not a second shared authority. Under [Agent Memory Federation Protocol v1](AGENT-MEMORY-FEDERATION.md), local state must be classified as `local_only`, `cache_pointer`, or `shared_candidate`. A cache pointer stores only `hub_item_id`, `revision`, `change_cursor`, and `cached_at`; Codex fetches current content from ContextHub so review, ACL, revocation, and successor state remain effective.
+
 ## Network endpoint
 
 Use a Tailscale DNS name or Tailscale IP for the NAS. Do not use the public IP and do not add router port-forwarding rules.
@@ -101,9 +103,12 @@ After restarting Codex:
 1. Confirm the server initializes and exposes 21 tools.
 2. Call `list_context_sources`.
 3. Call `compile_context` with a harmless task and confirm the package is accepted-only, namespace-bound, and under budget.
-4. Call `get_context_brief`.
-5. Save one harmless typed test memory with a fresh UUID and confirm it appears in `my_candidates`.
-6. Retry the exact write with the same UUID and confirm it replays rather than duplicates.
-7. Confirm a work connection cannot see a known personal item and vice versa.
+4. Confirm `conflicts[]` is present; if non-empty, verify every claimant is excluded and do not choose a winner locally.
+5. Call `get_changes`; confirm its protocol id and that each non-null `cache_pointer` has only `hub_item_id`, `revision`, `change_cursor`, and `cached_at`.
+6. Call `get_context_brief`.
+7. Save one harmless typed test memory with a fresh UUID and confirm it appears in `my_candidates`.
+8. Retry the exact write with the same UUID and confirm it replays rather than duplicates.
+9. Propose a successor for a reviewed test item and confirm the successor inherits its `claim_key` when omitted.
+10. Confirm a work connection cannot see a known personal item and vice versa.
 
 Only `accepted` memories are shared facts. A candidate written during the smoke test should be rejected or removed through the normal review workflow when finished.

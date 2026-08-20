@@ -2,7 +2,7 @@
 
 > 單節點、隱私優先、具 namespace 隔離、信任升格、Memory 生命週期與短暫 Context 編譯能力的**跨 AI Context Control Plane**，部署於私人 NAS。Codex、Claude Code、個人 Hermes、工作 Hermes 共用由使用者擁有、與 AI vendor 無關的 context domain。
 
-信任邊界、work 資料治理、DR 承諾見 [ADR-001](ADR-001-trust-boundary.md)；Context／Memory 分層決策見 [ADR-002](ADR-002-context-memory-separation.md)；v6 混合查找決策見 [ADR-003](ADR-003-hybrid-memory-retrieval.md)；Control Center 認證邊界見 [ADR-004](ADR-004-control-center-auth.md)；0.9.0 P1/P2 治理、可攜性與整合決策見 [ADR-005](ADR-005-p1-p2-integrations.md)，新增介面摘要見 [P1-P2 API notes](P1-P2-API.md)。
+信任邊界、work 資料治理、DR 承諾見 [ADR-001](ADR-001-trust-boundary.md)；Context／Memory 分層決策見 [ADR-002](ADR-002-context-memory-separation.md)；v6 混合查找決策見 [ADR-003](ADR-003-hybrid-memory-retrieval.md)；Control Center 認證邊界見 [ADR-004](ADR-004-control-center-auth.md)；0.9.0 P1/P2 治理、可攜性與整合決策見 [ADR-005](ADR-005-p1-p2-integrations.md)；agent local memory federation 與 conflict-safe compiler 見 [ADR-006](ADR-006-agent-memory-federation.md) 與 [Agent Memory Federation Protocol v1](AGENT-MEMORY-FEDERATION.md)，新增介面摘要見 [P1-P2 API notes](P1-P2-API.md)。
 
 ## 1. 問題與動機
 
@@ -25,6 +25,7 @@ AI agents 對使用者的理解破碎:財務在記帳 app、人際在 CRM、工�
 5. **未經 owner 明確同意:不建立替代權威儲存、不遷移、不切換。**
 6. **Memory ≠ Context**：Memory 回答「應該長期保留什麼」；Context Compiler 回答「這次模型應該看到什麼」。
 7. **有效 Memory 必須能影響行動**：以 `record_context_outcome` 的 coarse feedback 衡量是否改變 action 與結果；不保存 prompt、action text 或 context package 內容。
+8. **Agent local memory 不是共享權威**：只能是 `local_only`、metadata-only `cache_pointer` 或 `shared_candidate`；跨 agent 的 current accepted truth 由 ContextHub 與來源系統治理。
 
 ## 2. 明確承諾與非目標
 
@@ -50,6 +51,7 @@ flowchart TB
   Package["Ephemeral Context Package<br/>accepted + active only<br/>not a database row"]
   Runtime["Agent runtime<br/>system/user instructions + live tool output<br/>+ compiled persistent context"]
   Agents["ChatGPT · Claude · Codex · Cursor · Hermes"]
+  Local["Agent local memory<br/>local_only · cache_pointer · shared_candidate<br/>non-authoritative"]
   Action["Reasoning → Action"]
   Outcome["Outcome feedback<br/>package/item ids · helpfulness · action_changed"]
   Formation["Memory lifecycle<br/>observe → extract → classify → score → propose → review<br/>→ consolidate → retrieve → update → supersede / forget"]
@@ -60,6 +62,8 @@ flowchart TB
   Governance --> Retrieval --> Compiler
   Governance --> Formation
   Compiler --> Package --> Runtime --> Agents --> Action --> Outcome --> Formation --> Memory
+  Agents <--> Local
+  Local -.->|"hub_item_id + revision + cursor + cached_at"| Memory
 ```
 
 ContextHub 的 compiler 只處理持久資訊與明確要求的 operational state。System/user instructions 和剛產生的 tool output 留在 agent runtime，由 runtime 與 `rendered_context` 做最後 prompt 組裝；因此 ContextHub 不會把完整 conversation 或 tool transcript 誤當 Memory。
@@ -74,7 +78,7 @@ ContextHub 的 compiler 只處理持久資訊與明確要求的 operational stat
 
 Control Center 的 Web principal、session、principal-to-human-client links、agent enrollment 與 activity projection 由 migration v8 新增。`web_principals.control_admin` 只授予管理平面能力；Memory／Review 仍解析 linked human client 後呼叫既有 `commands` 與 policy/ACL/audit。Enrollment code 與 session/CSRF secret 僅保存 hash，raw 值只在必要 response 出現一次。
 
-Migration v10–v14 增加 audit hash chain、migration campaign／namespace portability metadata、change delivery／notification operational state、entity graph／consolidation projection 與 connector run metadata。這些新增表不改變權威邊界：Memory 仍只以 SQLite `context_items` 為權威，graph、embedding、facet 與 analytics 仍是可重建 projection；connector 只能經 allowlist 與 `core/commands.ts` 寫入最小化投影。
+Migration v10–v14 增加 audit hash chain、migration campaign／namespace portability metadata、change delivery／notification operational state、entity graph／consolidation projection 與 connector run metadata。Migration v15 增加 nullable `claim_key` 與 current-claim index，供 Federation v1 表達單一 winner identity；不加 unique constraint，讓既有矛盾可被 compiler 揭露與 reviewer 裁決。這些新增表／欄位不改變權威邊界：Memory 仍只以 SQLite `context_items` 為權威，graph、embedding、facet 與 analytics 仍是可重建 projection；connector 只能經 allowlist 與 `core/commands.ts` 寫入最小化投影。
 
 **一 key 一 namespace**:credential 本身就是 namespace 邊界。Claude Code 要同時用個人與工作記憶,就設兩個 MCP 連線(兩把 key)。namespace 與 source 一樣由 server 從認證身分決定,request body 傳什麼都沒用。
 
@@ -85,6 +89,7 @@ Migration v10–v14 增加 audit hash chain、migration campaign／namespace por
 | 維度 | 欄位 | 回答的問題 |
 |---|---|---|
 | **Information role（資訊角色）** | `information_class`（source/memory/task_state）、`memory_kind`（7 種）、`valid_from/valid_until`、`last_verified_at`、`decay_policy` | 這是來源投影、可重用 Memory，還是 operational state？何時有效、多久衰減？ |
+| **Claim identity（單一 winner 身分）** | nullable `claim_key`（canonical slash-separated `kind:value`） | 這筆 assertion 是否與其他項目競爭同一個 current winner？ |
 | **Provenance(來源)** | `source`(client id,不可偽造)、`authority`(user/app/agent,由 principal_kind 決定)、`derived_from`(insight 證據) | 誰說的? |
 | **Trust(信任)** | `trust_state`(candidate/accepted/rejected/revoked)、`acceptance_method`(human_review/policy/trusted_import)、`accepted_by/at`、`acceptance_policy_version`、`acceptance_rule_id` | 能不能進共享讀取面?誰、依哪版政策的哪條規則放行的? |
 | **Lifecycle(生命週期)** | `status`(active/completed/cancelled/superseded)、`superseded_by`、`successor_of`、`expires_at`、`deleted` | 現在還算數嗎?被誰取代了? |
@@ -99,6 +104,7 @@ Migration v10–v14 增加 audit hash chain、migration campaign／namespace por
 - **rejected/revoked 是終局**,從一切查詢消失;僅 creator/admin 可用精確 id 取回(含 review_note),agent 才知道為什麼被拒。
 - **機器產生的 insight 永遠先是 candidate**(寫死,政策不可繞過):app 自動推論≠已驗證。
 - **principal_kind**(agent/human/service)決定 authority:agent→agent、service→app、human→user。human 直接輸入走 `trusted_import`。
+- **`claim_key` 只用於 single-winner claim**：例如 `user:tim/preference:response_language/scope:contexthub`。歷史事件、交易與可並存經驗不使用；transaction 明確拒絕此欄位。Successor 未指定時繼承 predecessor 的 key。
 
 ### Per-type 寫入政策(命中同 `source_item_id`)
 
@@ -113,6 +119,8 @@ Migration v10–v14 增加 audit hash chain、migration campaign／namespace por
 ### 衝突裁決:單一 winner supersession
 
 Agent 發現 accepted 記憶過時→`propose_successor`(candidate,`successor_of` 指向舊項)。predecessor 在裁決前**仍是 current**。owner 接受 successor 時,同一 transaction 原子完成:successor→accepted、predecessor→`status=superseded, superseded_by=<new>`、review event、兩側版本快照、稽核。拒絕則 predecessor 不動。**裁決結果就此寫回 hub**,任何工具讀 predecessor 都看得到它被誰取代。
+
+如果同一 `claim_key` 已經有兩筆以上 active + accepted items，代表尚未裁決的 conflict。Compiler 不以 freshness、authority 或 retrieval score 自動挑選，而是把所有 claimant 從 task facts 排除並回傳 `conflicts[]`。Agent 必須查 `get_memory_history`／`source_uri`；使用者目前的明確指令只主導當次任務，長期修正仍要提出 successor 並由 reviewer 接受。這個強保證只適用於有標記 `claim_key` 的 assertion；舊資料不做猜測式自動 backfill。
 
 ### 版本與審核(append-only)
 
@@ -151,7 +159,7 @@ ContextHub 不保存全部 chat history。Memory formation 使用既有安全路
 1. **Lexical**：FTS5 unicode61、CJK 對稱切分、BM25；零命中時才用 bounded LIKE fallback。
 2. **Vector**：`sqlite-vec` 的 `vec_distance_cosine()`，對 `local-feature-hash-v1` 384 維本地 embedding 做 exact top-k。此 provider 同步、無網路、可注入替換；預設強項是 typo／形近與欄位加權，不冒充 neural semantic model。
 3. **Entity**：`entities` JSON array 的 exact／partial structured match；client 可明確傳 entity hints，query tokens 也會做保守推斷。寫入時以 NFKC、空白、大小寫與重複值正規化，entity 建議採 `<kind>:<canonical-id>`。
-4. **Semantic facets**：`information_class`、`memory_kind` 與 exact `entity_filters` 可由 caller 明確指定為硬過濾；query 自動推斷只作 boost，不自動把結果鎖死在某一分類。
+4. **Semantic facets**：`information_class`、`memory_kind`、exact `claim_keys` 與 `entity_filters` 可由 caller 明確指定為硬過濾；query 自動推斷只作 boost，不自動把結果鎖死在某一分類。
 5. **State**：operational state 不進一般索引；只由 compiler 對明確 `state_keys` 套 exact state rule 後加入。
 
 每一路候選 SQL 都在排名前呼叫同一個 `applyFilters()`：namespace → deleted/expiry/validity → trust surface → source/evidence ACL → sensitivity → type/status/tag/time。未授權 row 不會先成為 application-level candidate 再被丟棄。候選以 weighted Reciprocal Rank Fusion 合併，再乘 lifecycle/decay/confidence；回傳每筆 `retrieval_sources` 以及 mode、model、各路 candidate counts、elapsed time，方便 eval 與除錯，但 audit 不保存 query text。
@@ -164,12 +172,13 @@ ContextHub 不保存全部 chat history。Memory formation 使用既有安全路
 
 1. 以 task intent + optional related queries 做 deterministic intent expansion（中文 bigram／英數 token），不呼叫隱藏 LLM。
 2. `items-repo.search(mode=hybrid)` 取得 lexical／local-vector／entity 候選與 retrieval diagnostics；所有候選源先套 §6 的權威 filter。
-3. relevance score 加上 lifecycle/decay、confidence 與 authority weighting；相同 title+content 正規化去重。
-4. 明確指定的 `state_keys` 逐一通過 exact state rule，才可加入 task_state。
-5. 每個可用 information layer 至少有一筆機會，再依 global score 填入 token budget；無法容納者回報在 `omitted.budget`。
-6. 產生 vendor-neutral normalized sections，並輸出 target adapter：OpenAI／generic／Hermes 使用 JSON-quoted Markdown fields，Anthropic 使用 escaped XML boundary；兩者都把 retrieved content 明確標成 data、不是 instructions，降低來源內容的 prompt-injection 影響。
+3. 若命中帶 `claim_key` 的候選，先在相同 ACL/filter 下擴張取得所有 active accepted peers，避免低排名 claimant 落在 top-k 外而被漏判。
+4. 同一 `claim_key` 多筆 active accepted 時建立 `conflicts[]` 並排除全部 claimant；其餘候選才套 lifecycle/decay、confidence、authority weighting 與 title+content 去重。
+5. 明確指定的 `state_keys` 逐一通過 exact state rule，才可加入 task_state。
+6. 每個可用 information layer 至少有一筆機會，再依 global score 填入 token budget；無法容納者回報在 `omitted.budget`，衝突排除數回報在 `omitted.conflict`。
+7. 產生 vendor-neutral normalized sections，並輸出 target adapter：OpenAI／generic／Hermes 使用 JSON-quoted Markdown fields，Anthropic 使用 escaped XML boundary；兩者都把 retrieved content 明確標成 data、不是 instructions，並用 bounded warning 提醒未裁決 conflict。
 
-Compiler 回傳 `package_id`、sections、constraints、estimated tokens 與 `rendered_context`，但**不持久化 intent 或 package**。每次 compile 是 fail-closed audited read；audit details 只記 query count、target、budget、state-key count，不記 task text。
+Compiler 回傳 `package_id`、sections、constraints、`conflicts[]`、estimated tokens 與 `rendered_context`，但**不持久化 intent 或 package**。`constraints.unresolved_claims_excluded=true` 是 Federation v1 的 hard contract。每次 compile 是 fail-closed audited read；audit details 只記 query count、target、budget、state-key count，不記 task text。
 
 ## 8. 身分、認證與 ACL
 
@@ -212,7 +221,7 @@ Compiler 回傳 `package_id`、sections、constraints、estimated tokens 與 `re
 | `GET/PUT /v1/state/:key` | operational state(state_rules 裁決) |
 | `POST /v1/context/compile` | 依 intent/ACL/validity/budget 編譯短暫 Context Package；不持久化 intent/package |
 | `POST /v1/context/outcomes` | 寫入 coarse action-effectiveness feedback；不保存 prompt/action/package content |
-| `GET /v1/changes`、`POST /v1/changes/subscriptions` | namespace cursor feed；subscription 只保存 metadata，不保存 signing secret |
+| `GET /v1/changes`、`POST /v1/changes/subscriptions` | Federation v1 visibility-filtered namespace cursor + cache pointers；subscription 只保存 metadata，不保存 signing secret |
 | `POST /v1/entities/traverse`、`GET /v1/consolidation/suggestions` | ACL-first graph traversal 與只讀整理建議；不自動修改 accepted Memory |
 | `POST /v1/connectors/runs`、`POST /v1/connectors/tombstones` | metadata-only worker 狀態；tombstone 僅允許 service owner |
 | `POST/GET /v1/migrations/campaigns...`、`POST /v1/migrations/sources`、`POST /v1/migrations/ledger` | coverage-only migration campaign／source／ledger／gate 狀態 |

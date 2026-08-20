@@ -36,7 +36,7 @@
 11. **CHB-039｜Change delivery operations｜M｜implemented_local foundation / provider_verified pending / live_verified pending**：HTTPS host allowlist、metadata-only payload、retry/dead-letter 與 safe error-code 已覆蓋；簽章輪替、pause/resume、inspect/replay API 與 NAS alert wiring 尚待完成。
 12. **CHB-040｜Memory re-verification queue｜L｜proposed**：依 freshness、outcome、conflict、successor 產生 reviewer queue；永不自動改動 accepted Memory。
 13. **CHB-041｜Portability recovery drill｜M｜proposed**：以合成資料定期驗證 namespace export/import/dry-run/rollback、checksum、版本與 audit；不建立第二權威。
-14. **CHB-042｜Agent compatibility matrix｜M｜proposed**：用 legacy/enrollment auth 驗證 Codex、Claude、Hermes 的 initialize、tools、read/write、candidate 與 namespace isolation；不提前啟用 P3 OAuth。
+14. **CHB-042｜Agent Memory Federation v1 與 compatibility matrix｜M｜implemented_local / provider_verified pending / live_verified pending**：schema v15 `claim_key`、pointer-only local cache contract、conflict-safe compiler、MCP instructions，以及 OpenAI／Anthropic／Hermes target 的 session、cache refresh、candidate、successor、conflict exclusion、namespace isolation 本機 contract tests 已完成。仍須用真實 Codex、Claude、Hermes clients 分別驗證 legacy/enrollment initialize、instructions 與完整流程；不得把本機 MCP SDK 測試當成 provider 或 NAS production 證據，也不提前啟用 P3 OAuth。
 
 ## P3 — 只在量測 gate 通過後執行
 

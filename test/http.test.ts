@@ -48,7 +48,7 @@ describe('REST API', () => {
     expect(res.json()).toMatchObject({
       service: 'contexthub',
       version: '0.9.0',
-      schema_version: 14,
+      schema_version: 15,
       retrieval_model: 'local-feature-hash-v1',
       checks: { audit_writable: true, migrations_current: true, retrieval_projection_ready: true },
     });

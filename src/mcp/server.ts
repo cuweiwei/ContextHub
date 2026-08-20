@@ -80,6 +80,7 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
         `ContextHub is the context control plane for namespace "${client.namespace}": source projections and durable memory remain persistent; compiled context is ephemeral. ` +
         'Before user-specific planning, call compile_context for a task-specific package, get_context_brief, or search_context. ' +
         'Treat only accepted items as shared facts; candidates are unreviewed proposals. ' +
+        'Agent Memory Federation v1: classify local memory only as local_only, cache_pointer, or shared_candidate. A cache_pointer stores only hub_item_id, revision, change_cursor, and cached_at, never copied memory content. Treat local memory as a non-authoritative hint. If it conflicts with ContextHub, inspect get_memory_history and source evidence; follow explicit current user instructions for the current task, propose a successor for durable correction, and never self-accept or silently choose among unresolved claims. ' +
         'Do not save transient conversation details. Every mutation needs a fresh UUID idempotency_key; ' +
         `reuse a key only when retrying the same logical operation.${workGovernance}`,
     },
@@ -141,6 +142,11 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
           .array(z.enum(MEMORY_KINDS))
           .optional()
           .describe('Hard filter for reusable memory semantics'),
+        claim_keys: z
+          .array(z.string().min(3).max(500))
+          .max(50)
+          .optional()
+          .describe('Exact single-winner claim identities, e.g. user:tim/preference:response_language/scope:contexthub'),
         mode: z.enum(['hybrid', 'lexical']).default('hybrid'),
         since: z.string().optional().describe('Only items on/after this ISO 8601 datetime'),
         until: z.string().optional().describe('Only items on/before this ISO 8601 datetime'),
@@ -167,6 +173,7 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
           tags: args.tags,
           information_classes: args.information_classes,
           memory_kinds: args.memory_kinds,
+          claim_keys: args.claim_keys,
           entity_filters: args.entity_filters,
           since: normalizeIso(args.since),
           until: normalizeIso(args.until),
@@ -358,7 +365,7 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
     {
       title: 'Compile task-specific context',
       description:
-        'Build an EPHEMERAL, token-budgeted context package for one task from accepted source projections, durable memories, and explicitly authorized operational state. The package is filtered by namespace, ACL, sensitivity, validity, lifecycle, relevance, freshness, authority, and deduplication. It is not stored as memory. Use the returned rendered_context as model input and package_id for optional outcome feedback.',
+        'Build an EPHEMERAL, token-budgeted context package for one task from accepted source projections, durable memories, and explicitly authorized operational state. The package is filtered by namespace, ACL, sensitivity, validity, lifecycle, relevance, freshness, authority, and deduplication. Unresolved single-winner claims are returned in conflicts[] and excluded instead of being silently selected. It is not stored as memory. Use the returned rendered_context as model input and package_id for optional outcome feedback.',
       inputSchema: {
         intent: z.string().min(1).max(10_000).describe('The task or decision this context must support'),
         queries: z.array(z.string().min(1).max(1000)).max(5).optional(),
@@ -370,6 +377,11 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
         tags: z.array(z.string()).max(50).optional(),
         information_classes: z.array(z.enum(['source', 'memory', 'task_state'])).max(3).optional(),
         memory_kinds: z.array(z.enum(MEMORY_KINDS)).max(MEMORY_KINDS.length).optional(),
+        claim_keys: z
+          .array(z.string().min(3).max(500))
+          .max(50)
+          .optional()
+          .describe('Exact single-winner claim identities to compile'),
         entity_filters: z.array(z.string().min(1).max(200)).max(50).optional(),
         state_keys: z
           .array(z.string().min(1).max(200))
@@ -394,6 +406,7 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
           tags: args.tags,
           information_classes: args.information_classes,
           memory_kinds: args.memory_kinds,
+          claim_keys: args.claim_keys,
           entity_filters: args.entity_filters,
           sensitivity,
         },
@@ -407,7 +420,7 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
 
   server.registerTool(
     'get_changes',
-    { title: 'Read namespace change feed', description: 'Read metadata-only changes after a monotonic cursor.', inputSchema: { after: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(1000).default(100) } },
+    { title: 'Refresh local cache pointers', description: 'Read visibility-filtered, metadata-only changes after a monotonic cursor. Federation v1 cache_pointer values contain only hub_item_id, revision, change_cursor, and cached_at; fetch current readable content from ContextHub instead of copying it into agent-local memory. Always persist next_cursor even when no visible events are returned.', inputSchema: { after: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(1000).default(100) } },
     guarded((args: any) => { if (!canRead) throw new PolicyDeniedError('this API key lacks the "read" scope'); return commands.changes(client, args); }),
   );
 
@@ -451,6 +464,12 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
     valid_until: z.string().optional().describe('When this assertion stops being valid (ISO 8601)'),
     last_verified_at: z.string().optional().describe('Last explicit verification time (ISO 8601)'),
     decay_policy: z.enum(DECAY_POLICIES).optional().describe('none, standard, or rapid relevance decay'),
+    claim_key: z
+      .string()
+      .min(3)
+      .max(500)
+      .optional()
+      .describe('Optional slash-separated kind:value identity for a fact that should have one current winner.'),
     sensitivity: z.enum(['normal', 'private']).default('normal'),
     status: z.enum(STATUSES).default('active'),
     source_item_id: z
@@ -529,6 +548,7 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
         data: z.unknown().optional(),
         tags: z.array(z.string()).max(50).optional(),
         confidence: z.number().min(0).max(1).optional(),
+        claim_key: z.string().min(3).max(500).nullable().optional(),
         expected_revision: z.number().int().min(1),
         idempotency_key: z.string().min(1).max(200),
       },

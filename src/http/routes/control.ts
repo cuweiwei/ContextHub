@@ -103,7 +103,7 @@ function controlFilters(query: Record<string, unknown>): ListFilters {
   };
   return {
     sources: csv(query.source), types: csv(query.type), tags: csv(query.tag), entity_filters: csv(query.entity),
-    information_classes: valid(csv(query.information_class), INFORMATION_CLASSES), memory_kinds: valid(csv(query.memory_kind), MEMORY_KINDS),
+    information_classes: valid(csv(query.information_class), INFORMATION_CLASSES), memory_kinds: valid(csv(query.memory_kind), MEMORY_KINDS), claim_keys: csv(query.claim_key),
     statuses: valid(csv(query.status), STATUSES), trust_states: valid(csv(query.trust), TRUST_STATES),
     sensitivity: query.sensitivity === 'normal' || query.sensitivity === 'private' || query.sensitivity === 'all' ? query.sensitivity : undefined,
     validity: query.validity === 'scheduled' || query.validity === 'expired' || query.validity === 'all' ? query.validity as ValidityFilter : 'current',

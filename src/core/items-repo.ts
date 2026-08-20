@@ -5,6 +5,7 @@ import {
   canonicalEntities,
   canonicalTags,
   canonicalizeSourcePayload,
+  normalizeClaimKey,
   normalizeEntity,
   normalizeTag,
 } from './canonical.js';
@@ -159,6 +160,7 @@ export interface CurationSuggestion {
   related_item_ids: string[];
   title: string;
   memory_kind: MemoryKind | null;
+  claim_key: string | null;
   reason: string;
   severity: 'info' | 'warning';
 }
@@ -234,6 +236,7 @@ interface ItemRow {
   acceptance_rule_id: string | null;
   information_class: InformationClass;
   memory_kind: MemoryKind | null;
+  claim_key: string | null;
   confidence: number | null;
   occurred_at: string | null;
   created_at: string;
@@ -279,6 +282,7 @@ function rowToItem(row: ItemRow): ContextItem {
     acceptance_rule_id: row.acceptance_rule_id,
     information_class: row.information_class,
     memory_kind: row.memory_kind,
+    claim_key: row.claim_key,
     confidence: row.confidence,
     occurred_at: row.occurred_at,
     created_at: row.created_at,
@@ -316,6 +320,7 @@ export function toCompact(item: ContextItem, queryTokens: string[] = []): Compac
     trust_state: item.trust_state,
     information_class: item.information_class,
     memory_kind: item.memory_kind,
+    claim_key: item.claim_key,
     confidence: item.confidence,
     occurred_at: item.occurred_at,
     created_at: item.created_at,
@@ -386,14 +391,14 @@ export function createItemsRepo(
       acceptance_policy_version, acceptance_rule_id, information_class, memory_kind,
       confidence, occurred_at, created_at, updated_at, expires_at, valid_from, valid_until,
       last_verified_at, decay_policy, source_item_id, source_uri, revision, idempotency_key,
-      successor_of, state_kind, state_key, schema_id
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      successor_of, state_kind, state_key, schema_id, claim_key
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const contentUpdateStmt = db.prepare(`
     UPDATE context_items SET type = ?, title = ?, content = ?, data = ?, tags = ?,
       entities = ?, sensitivity = ?, status = ?, confidence = ?,
       occurred_at = ?, expires_at = ?, valid_from = ?, valid_until = ?,
-      last_verified_at = ?, decay_policy = ?, source_uri = ?, revision = ?, updated_at = ?
+      last_verified_at = ?, decay_policy = ?, source_uri = ?, claim_key = ?, revision = ?, updated_at = ?
     WHERE id = ?
   `);
   const ftsInsert = db.prepare('INSERT INTO items_fts (rowid, title, content, tags) VALUES (?, ?, ?, ?)');
@@ -556,6 +561,7 @@ export function createItemsRepo(
         current.information_class === 'memory'
           ? inferredDecayPolicy(current.memory_kind, input.decay_policy)
           : null,
+      claim_key: input.claim_key ?? null,
       source_uri: input.source_uri ?? null,
       revision: current.revision + 1,
       updated_at: new Date().toISOString(),
@@ -566,7 +572,7 @@ export function createItemsRepo(
       JSON.stringify(next.tags), JSON.stringify(next.entities),
       next.sensitivity, next.status, next.confidence,
       next.occurred_at, next.expires_at, next.valid_from, next.valid_until,
-      next.last_verified_at, next.decay_policy, next.source_uri,
+      next.last_verified_at, next.decay_policy, next.source_uri, next.claim_key,
       next.revision, next.updated_at, next.id,
     );
     reindexItem(next.id, next);
@@ -605,6 +611,7 @@ export function createItemsRepo(
     }
 
     if (existing.type === 'transaction' || input.type === 'transaction') {
+      if (input.claim_key) throw new ValidationError('claim_key is not valid for append-only transactions');
       const current = rowToItem(existing);
       const same =
         canonicalizeSourcePayload(current) ===
@@ -637,7 +644,7 @@ export function createItemsRepo(
           `UPDATE context_items SET title = ?, content = ?, data = ?, tags = ?, entities = ?,
              sensitivity = ?, information_class = ?, memory_kind = ?, confidence = ?,
              occurred_at = ?, expires_at = ?, valid_from = ?, valid_until = ?,
-             last_verified_at = ?, decay_policy = ?, source_uri = ?,
+             last_verified_at = ?, decay_policy = ?, source_uri = ?, claim_key = ?,
              revision = revision + 1, updated_at = ?
            WHERE id = ? AND trust_state = 'candidate'`,
         )
@@ -649,7 +656,7 @@ export function createItemsRepo(
           input.occurred_at ?? null, input.expires_at ?? null,
           input.valid_from ?? null, input.valid_until ?? null,
           input.last_verified_at ?? null, inferredDecayPolicy(nextMemoryKind, input.decay_policy),
-          input.source_uri ?? null,
+          input.source_uri ?? null, input.claim_key ?? null,
           now, existing.id,
         );
       if (res.changes === 0) {
@@ -688,6 +695,9 @@ export function createItemsRepo(
       input.tags = canonicalTags(input.tags);
       input.entities = canonicalEntities(input.entities);
       validateValidityWindow(input.valid_from, input.valid_until);
+      if (input.type === 'transaction' && input.claim_key) {
+        throw new ValidationError('claim_key is not valid for append-only transactions');
+      }
       if (input.derived_from.length > 0 && input.type !== 'insight') {
         throw new ValidationError('derived_from is only allowed on insight items');
       }
@@ -696,6 +706,7 @@ export function createItemsRepo(
         if (validateEvidence(input.derived_from, writer) === 'private') sensitivity = 'private';
       }
 
+      let predecessorClaimKey: string | null = null;
       if (extras.successorOf) {
         const pred = selectById.get(extras.successorOf) as ItemRow | undefined;
         const readable =
@@ -712,6 +723,7 @@ export function createItemsRepo(
         if (pred!.superseded_by) {
           throw new SourceItemConflictError(`predecessor is already superseded by ${pred!.superseded_by}`);
         }
+        predecessorClaimKey = pred!.claim_key;
       }
 
       if (input.idempotency_key) {
@@ -731,6 +743,7 @@ export function createItemsRepo(
       const accepted = trust.trustState === 'accepted';
       const memoryKind = memoryKindForItem(authority, input.type, input.memory_kind);
       const informationClass = inferredInformationClass(authority, input.type, memoryKind);
+      const claimKey = input.claim_key ? normalizeClaimKey(input.claim_key) : predecessorClaimKey;
       const item: ContextItem = {
         id: ulid(),
         source: writer.clientId,
@@ -762,6 +775,7 @@ export function createItemsRepo(
         last_verified_at: input.last_verified_at ?? null,
         decay_policy:
           informationClass === 'memory' ? inferredDecayPolicy(memoryKind, input.decay_policy) : null,
+        claim_key: claimKey,
         source_item_id: input.source_item_id ?? null,
         source_uri: input.source_uri ?? null,
         revision: 1,
@@ -787,7 +801,7 @@ export function createItemsRepo(
         item.expires_at, item.valid_from, item.valid_until, item.last_verified_at,
         item.decay_policy, item.source_item_id, item.source_uri, item.revision,
         input.idempotency_key ?? null,
-        item.successor_of, item.state_kind, item.state_key, item.schema_id,
+        item.successor_of, item.state_kind, item.state_key, item.schema_id, item.claim_key,
       );
       indexItem(res.lastInsertRowid, item);
       for (const ev of item.derived_from) evidenceInsert.run(item.id, ev);
@@ -875,6 +889,7 @@ export function createItemsRepo(
       const current = rowToItem(row);
       if (patch.tags !== undefined) patch.tags = canonicalTags(patch.tags);
       if (patch.entities !== undefined) patch.entities = canonicalEntities(patch.entities);
+      if (patch.claim_key !== undefined && patch.claim_key !== null) patch.claim_key = normalizeClaimKey(patch.claim_key);
       const next: ContextItem = {
         ...current,
         ...('type' in patch && patch.type !== undefined ? { type: patch.type } : {}),
@@ -892,6 +907,7 @@ export function createItemsRepo(
         ...('valid_until' in patch ? { valid_until: patch.valid_until ?? null } : {}),
         ...('last_verified_at' in patch ? { last_verified_at: patch.last_verified_at ?? null } : {}),
         ...('decay_policy' in patch ? { decay_policy: patch.decay_policy ?? null } : {}),
+        ...('claim_key' in patch ? { claim_key: patch.claim_key ?? null } : {}),
         ...('source_uri' in patch ? { source_uri: patch.source_uri ?? null } : {}),
         revision: current.revision + 1,
         updated_at: new Date().toISOString(),
@@ -903,7 +919,7 @@ export function createItemsRepo(
         JSON.stringify(next.tags), JSON.stringify(next.entities),
         next.sensitivity, next.status, next.confidence,
         next.occurred_at, next.expires_at, next.valid_from, next.valid_until,
-        next.last_verified_at, next.decay_policy, next.source_uri,
+        next.last_verified_at, next.decay_policy, next.source_uri, next.claim_key,
         next.revision, next.updated_at, next.id,
       );
       reindexItem(id, next);
@@ -1189,6 +1205,11 @@ export function createItemsRepo(
     if (filters?.memory_kinds?.length) {
       where.push(`${alias}.memory_kind IN (${filters.memory_kinds.map(() => '?').join(',')})`);
       params.push(...filters.memory_kinds);
+    }
+    if (filters?.claim_keys?.length) {
+      const claimKeys = [...new Set(filters.claim_keys.map(normalizeClaimKey))];
+      where.push(`${alias}.claim_key IN (${claimKeys.map(() => '?').join(',')})`);
+      params.push(...claimKeys);
     }
     if (filters?.statuses?.length) {
       where.push(`${alias}.status IN (${filters.statuses.map(() => '?').join(',')})`);
@@ -1584,12 +1605,30 @@ export function createItemsRepo(
 
     const byContent = new Map<string, ContextItem[]>();
     const byTitle = new Map<string, ContextItem[]>();
+    const byClaimKey = new Map<string, ContextItem[]>();
     for (const item of items) {
       if (!active(item)) continue;
       const contentKey = `${textKey(item.title)}\n${textKey(item.content)}`;
       const titleKey = `${textKey(item.title)}\n${item.memory_kind ?? ''}`;
       byContent.set(contentKey, [...(byContent.get(contentKey) ?? []), item]);
       byTitle.set(titleKey, [...(byTitle.get(titleKey) ?? []), item]);
+      if (item.claim_key) {
+        byClaimKey.set(item.claim_key, [...(byClaimKey.get(item.claim_key) ?? []), item]);
+      }
+    }
+    for (const [claimKey, group] of byClaimKey) {
+      if (group.length < 2) continue;
+      const first = group[0]!;
+      add({
+        kind: 'conflict',
+        item_id: first.id,
+        related_item_ids: group.slice(1).map((item) => item.id),
+        title: first.title,
+        memory_kind: first.memory_kind,
+        claim_key: claimKey,
+        reason: `claim_key ${claimKey} 有多筆 active accepted winner；compiler 會全部排除，請查歷史並以 revoke/successor 裁決。`,
+        severity: 'warning',
+      });
     }
     for (const group of byContent.values()) {
       if (group.length < 2) continue;
@@ -1600,6 +1639,7 @@ export function createItemsRepo(
         related_item_ids: group.slice(1).map((item) => item.id),
         title: first.title,
         memory_kind: first.memory_kind,
+        claim_key: first.claim_key,
         reason: '相同 normalized title/content；請保留單一 accepted 記憶或建立 successor。',
         severity: 'info',
       });
@@ -1625,6 +1665,7 @@ export function createItemsRepo(
             related_item_ids: [second.id],
             title: first.title,
             memory_kind: first.memory_kind,
+            claim_key: first.claim_key,
             reason: '相同 title/memory_kind 且內容高度相似；請人工確認是否保留單一 accepted 記憶或建立 successor。',
             severity: 'info',
           });
@@ -1637,6 +1678,7 @@ export function createItemsRepo(
         related_item_ids: group.slice(1).map((item) => item.id),
         title: first.title,
         memory_kind: first.memory_kind,
+        claim_key: first.claim_key,
         reason: '相同 title 與 memory_kind 但內容不同；請核對 validity、verified_at 或提出 successor。',
         severity: 'warning',
       });
@@ -1650,6 +1692,7 @@ export function createItemsRepo(
           related_item_ids: [],
           title: item.title,
           memory_kind: item.memory_kind,
+          claim_key: item.claim_key,
           reason: 'working_state 已過 valid_until/expires_at；請更新、封存或刪除。',
           severity: 'warning',
         });
@@ -1664,6 +1707,7 @@ export function createItemsRepo(
           related_item_ids: [],
           title: item.title,
           memory_kind: item.memory_kind,
+          claim_key: item.claim_key,
           reason: `超過 ${thresholdDays} 天未明確驗證；請補 last_verified_at 或提出 successor。`,
           severity: 'warning',
         });
@@ -1771,6 +1815,78 @@ export function createItemsRepo(
     };
   }
 
+  /**
+   * Expand the retrieval seed to every currently-readable active accepted row
+   * that shares one of its claim keys. This prevents a lower-ranked conflicting
+   * claimant from falling outside the lexical/vector top-k and being silently
+   * missed by the compiler.
+   */
+  function claimPeers(
+    access: ReadAccess,
+    claimKeys: string[],
+    filters: ListFilters | undefined,
+  ): ContextItem[] {
+    const keys = [...new Set(claimKeys.map(normalizeClaimKey).filter(Boolean))].slice(0, 100);
+    if (keys.length === 0) return [];
+    const now = new Date().toISOString();
+    const where: string[] = [];
+    const params: unknown[] = [];
+    applyFilters(
+      where,
+      params,
+      { ...filters, statuses: ['active'], claim_keys: keys },
+      now,
+      access,
+      'accepted',
+    );
+    return (db
+      .prepare(`SELECT i.* FROM context_items i WHERE ${where.join(' AND ')} ORDER BY i.updated_at DESC LIMIT 1000`)
+      .all(...params) as ItemRow[]).map(rowToItem);
+  }
+
+  /**
+   * Visibility gate for the metadata-only agent cache feed. An accepted item
+   * remains visible after revocation/deletion so a client that previously
+   * cached its pointer can invalidate it. Other clients' never-accepted
+   * candidates and rejected proposals remain undiscoverable.
+   */
+  function changeVisible(access: ReadAccess, id: string): boolean {
+    const row = selectById.get(id) as ItemRow | undefined;
+    if (!row) return false;
+    if (!access.isAdmin && row.namespace !== access.namespace) return false;
+    if (row.sensitivity === 'private' && access.maxSensitivity !== 'private') return false;
+    if (access.readSources !== null && !access.readSources.includes(row.source)) return false;
+
+    // Insights inherit the ACL/sensitivity ceiling of their full evidence
+    // closure even after the insight itself is revoked.
+    if (row.type === 'insight') {
+      const pending = [...derivedFrom(row.id)];
+      const seen = new Set<string>();
+      while (pending.length > 0) {
+        const evidenceId = pending.pop()!;
+        if (seen.has(evidenceId)) continue;
+        seen.add(evidenceId);
+        if (seen.size > 100) return false;
+        const evidence = selectById.get(evidenceId) as ItemRow | undefined;
+        if (!evidence || evidence.namespace !== row.namespace) return false;
+        if (evidence.sensitivity === 'private' && access.maxSensitivity !== 'private') return false;
+        if (access.readSources !== null && !access.readSources.includes(evidence.source)) return false;
+        if (evidence.type === 'insight') pending.push(...derivedFrom(evidence.id));
+      }
+    }
+
+    if (row.trust_state === 'accepted' || row.source === access.clientId) return true;
+    if (row.trust_state !== 'revoked') return false;
+    const accepted = db
+      .prepare(
+        `SELECT 1 AS found FROM item_versions
+         WHERE item_id = ? AND json_extract(snapshot, '$.trust_state') = 'accepted'
+         LIMIT 1`,
+      )
+      .get(id) as { found: number } | undefined;
+    return Boolean(accepted);
+  }
+
   // --- operational state slots ---
 
   function getStateByKey(namespace: string, stateKey: string): ContextItem | null {
@@ -1836,6 +1952,7 @@ export function createItemsRepo(
           valid_until: null,
           last_verified_at: input.observedAt ?? now,
           decay_policy: null,
+          claim_key: null,
           source_item_id: null,
           source_uri: null,
           revision: 1,
@@ -1859,7 +1976,7 @@ export function createItemsRepo(
           null, null, item.created_at, item.updated_at,
           item.expires_at, null, null, item.last_verified_at, null,
           null, null, 1, null,
-          null, item.state_kind, item.state_key, item.schema_id,
+          null, item.state_kind, item.state_key, item.schema_id, null,
         );
         writeVersion(item, 'create', writer.clientId);
         return { item, created: true };
@@ -1974,6 +2091,8 @@ export function createItemsRepo(
     curationSuggestions,
     brief,
     currentContext,
+    claimPeers,
+    changeVisible,
     getStateByKey,
     upsertOperationalState,
     reindex,

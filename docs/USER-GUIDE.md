@@ -16,6 +16,20 @@ ContextHub 把不同 AI 工具需要的來源摘要與長期記憶放在同一�
 - 每筆記憶都保留來源、狀態與修改歷史。
 - 個人與工作記憶分開管理，不會因為使用同一個平台就自動互通。
 
+### AI 自己的記憶跟 ContextHub 有什麼關係？
+
+Codex、Claude、Hermes 可能各自有內建記憶。這些 local memory 可以保存某個工具或 workspace 專用的操作習慣，也可以暫存「ContextHub 某筆記憶已讀到哪個版本」；但它不是另一套跨 AI 的正式事實庫。
+
+可以把關係理解成：
+
+- 來源 app 管原始事實，例如 Calendar 管行程、GitHub 管 repository 狀態。
+- ContextHub 管經你接受、可以跨 AI 共用的長期記憶與裁決歷史。
+- 每個 AI 的 local memory 只管局部使用方式、指向 ContextHub 的 cache pointer，或尚待送審的提案。
+
+Local cache 不應複製整份長期記憶，只記 item id、revision、change cursor 與 cache 時間。這樣記憶被撤銷、取代或權限改變時，AI 重新讀取 ContextHub 就會取得目前狀態，不會繼續使用舊副本。
+
+若 ContextHub 發現同一個「應該只有一個目前答案」的事實有兩筆已接受版本，會把兩筆都暫時排除並告訴 AI 有 conflict。AI 不可自己選較新的一筆；它應查來源與歷史，遵照你對眼前任務的明確指示，再提出 successor 讓你審核。完整技術規則見 [Agent Memory Federation Protocol v1](AGENT-MEMORY-FEDERATION.md)。
+
 ## 2. 開始前要準備什麼
 
 你需要：
@@ -218,6 +232,10 @@ ContextHub 使用不同的 namespace 隔離資料：
 2. 使用正確 namespace 的 credential。
 3. 能呼叫 `list_context_sources`。
 4. 搜尋的是 accepted 記憶，而不是只查自己的 candidates。
+
+### AI 說 ContextHub 有記憶衝突
+
+這代表同一個 single-winner claim 有不只一筆 active accepted 記憶；系統刻意沒有替你猜答案。請 AI 顯示 `conflicts[]` 的 claim key 與 item ids，查閱各自 history/source，再告訴 AI 本次任務該採用哪個資訊。若要永久修正，請讓 AI 提出 successor，最後仍由你在 review 流程接受或拒絕。
 
 ## 9. 備份與復原
 
