@@ -76,6 +76,7 @@ jobs:
       - name: Verify GitHub provenance attestation
         env:
           IMAGE: ${{ steps.release.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
         run: gh attestation verify "oci://$IMAGE" -R "$GITHUB_REPOSITORY"
 
   deploy:
