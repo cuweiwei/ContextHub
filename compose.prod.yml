@@ -28,8 +28,7 @@ services:
       TELEGRAM_BOT_TOKEN_FILE: ${TELEGRAM_BOT_TOKEN_FILE:-}
       TELEGRAM_CHAT_ID_FILE: ${TELEGRAM_CHAT_ID_FILE:-}
     volumes:
-      - ./data:/data
-      - ./audit-anchors:/audit-anchors
+      - /volume1/docker/contexthub/data:/data
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 30s
