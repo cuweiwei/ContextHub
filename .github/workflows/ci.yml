@@ -149,7 +149,7 @@ jobs:
           format: cyclonedx
           output: artifacts/contexthub-sbom.cyclonedx.json
       - name: Upload SBOM
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: contexthub-sbom-${{ github.run_id }}
           path: artifacts/contexthub-sbom.cyclonedx.json
@@ -174,7 +174,7 @@ jobs:
         run: npm run release:manifest
       - name: Upload release manifest
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: contexthub-release-${{ github.sha }}
           path: artifacts/release-manifest.json
