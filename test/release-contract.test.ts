@@ -1,26 +1,62 @@
+import { createHash } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
 import { parseDeploymentEvidence, parseReleaseManifest } from '../src/ops/release-contract.js';
 
 const commit = 'f'.repeat(40);
 const digest = `sha256:${'a'.repeat(64)}`;
+const execFileAsync = promisify(execFile);
 
 function release() {
   return {
-    format: 'contexthub-release/v1', repository: 'cuweiwei/ContextHub', ref: 'refs/heads/main', version: '0.9.0', commit,
-    image: `ghcr.io/cuweiwei/contexthub@${digest}`, digest, ci_run_id: '123', ci_run_url: 'https://github.com/cuweiwei/ContextHub/actions/runs/123',
-    sbom_artifact: 'contexthub-sbom-123', provenance_subject: `cuweiwei/ContextHub@${commit}`, deploy_contract_version: 1,
-    created_at: '2026-08-20T00:00:00.000Z',
+    schemaVersion: 1, serviceId: 'contexthub', repository: 'cuweiwei/ContextHub', commitSha: commit,
+    imageDigest: digest, composePath: 'compose.prod.yml', composeSha256: 'b'.repeat(64),
+    deploymentProjectId: 'contexthub', health: { path: '/health' },
   };
 }
 
 describe('release and deployment contracts', () => {
   it('accepts a commit-bound immutable release manifest', () => {
-    expect(parseReleaseManifest(release()).digest).toBe(digest);
+    expect(parseReleaseManifest(release()).imageDigest).toBe(digest);
   });
 
-  it('rejects an image/digest mismatch and unknown fields', () => {
-    expect(() => parseReleaseManifest({ ...release(), image: 'ghcr.io/cuwewei/ContextHub@sha256:' + 'b'.repeat(64) })).toThrow();
+  it('rejects invalid release coordinates and unknown fields', () => {
+    expect(() => parseReleaseManifest({ ...release(), imageDigest: 'latest' })).toThrow();
     expect(() => parseReleaseManifest({ ...release(), unexpected: true })).toThrow();
+  });
+
+  it('generates the AiHomePlatform contract with the checked-in Compose checksum', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contexthub-release-'));
+    const output = path.join(directory, 'release-manifest.json');
+    try {
+      await execFileAsync(process.execPath, ['node_modules/tsx/dist/cli.mjs', 'scripts/create-release-manifest.ts'], {
+        cwd: process.cwd(),
+        env: { ...process.env, RELEASE_COMMIT: commit, RELEASE_DIGEST: digest, RELEASE_MANIFEST_OUT: output },
+      });
+      const generated = parseReleaseManifest(JSON.parse(fs.readFileSync(output, 'utf8')));
+      const compose = fs.readFileSync('compose.prod.yml');
+      const composeText = compose.toString('utf8');
+      const composeSha256 = createHash('sha256').update(compose).digest('hex');
+      expect(composeText.match(/@\$\{[A-Z][A-Z0-9_]*(?::[^}]*)?\}/g)).toEqual([
+        '@${IMAGE_DIGEST:?IMAGE_DIGEST is required}',
+      ]);
+      expect(composeText).toContain('AIHP_RELEASE_COMMIT: ${AIHP_RELEASE_COMMIT:-}');
+      expect(composeText).toContain('AIHP_IMAGE_DIGEST: ${AIHP_IMAGE_DIGEST:-}');
+      expect(generated).toMatchObject({
+        schemaVersion: 1,
+        serviceId: 'contexthub',
+        commitSha: commit,
+        imageDigest: digest,
+        composeSha256,
+        health: { path: '/health' },
+      });
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it('accepts metadata-only verified deployment evidence', () => {

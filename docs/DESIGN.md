@@ -85,6 +85,7 @@ Agent runtime 負責目前 session 的 system/security instructions、使用者�
 | `/v1/*` | Apps、審核 UI、admin | REST + Bearer API key |
 | `/mcp` | AI agents | MCP Streamable HTTP(stateless)+ Bearer API key |
 | `/health` | 監控 | 免認證;只回報 redacted readiness 與 build/schema/model 狀態 |
+| `/health/ops` | AiHomePlatform 維運 evidence | 免認證、唯讀、no-store；只回 release commit/digest、database readiness 與 backup/restore/secret adapter 的保守狀態 |
 | `/dashboard`、`/memories`、`/review`、`/agents`、`/namespaces`、`/policies`、`/audit`、`/effectiveness`、`/settings` | 人類 Control Center | Tailscale HTTPS identity → revocable web session；不接受 ADMIN_TOKEN |
 | `/mcp/:namespace` | canonical MCP resource | legacy key 相容路徑；namespace 必須與 server-side credential 相同 |
 
@@ -241,6 +242,7 @@ Compiler 回傳 `package_id`、sections、constraints、`conflicts[]`、estimate
 | `GET/PUT /v1/policies/:ns`、`GET .../versions/:v`、`POST .../validate`、`.../simulate`、`.../rollback` | 政策讀取、驗證、模擬、升版與 rollback；寫入支援 `base_version` optimistic concurrency |
 | `POST /v1/clients`(namespace+principal_kind 必填,選配 profile)、`POST /v1/clients/:id/rotate-key`、`PATCH /v1/clients/:id`、`GET/POST /v1/namespaces`、`GET/PUT /v1/state-schemas/:id` | 管理(admin) |
 | `GET /health` | 無敏感 readiness（service/version/build/schema/model 與 audit/migration/projection/disk 狀態） |
+| `GET /health/ops` | 無敏感 service-owned 維運 evidence；release 座標來自 `AIHP_RELEASE_COMMIT`／`AIHP_IMAGE_DIGEST`，未驗證的 adapter 保持 `unverified` |
 
 0.9.0 新增參數限制、CLI 與 OAuth protected-resource metadata 細節見 [P1-P2 API notes](P1-P2-API.md)。Control Center 的 `/v1/control/*` 路由使用 Tailscale identity 建立的 web session，Memory 讀寫仍解析 linked namespace-scoped human client 後呼叫同一組 commands。
 

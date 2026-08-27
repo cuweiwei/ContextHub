@@ -24,9 +24,11 @@ GHCR manifest 可讀取，`gh attestation verify` 已通過，所以 immutable r
 health、isolated restore drill、doctor、rollback image 與 `DEPLOYMENT VERIFIED`，因此這個 release
 已 `live_verified`。
 
-GitHub 目前仍無 `production` environment，也沒有 `ContextHub production deploy` workflow run；
-所以以上證據只證明 owner-authorized manual production path 與該次 running release，不代表
-GitHub Actions 自動部署路徑已 `provider_verified`。
+截至 2026-08-24，production workflow 已出現失敗嘗試，但仍沒有成功、可驗證的自動 production
+deployment；是否已有 `production` environment 也未在本輪以 owner 權限確認。所以以上證據只
+證明歷史 owner-authorized manual production path，不代表 GitHub Actions 自動部署路徑已
+`provider_verified`。目前 Codex 對 NAS 的正式入口是共享 `/usr/local/bin/deployment` gateway；
+本節的 GitHub OIDC／forced-command 設計仍是未完成的自動化方案。
 
 ## GitHub repository settings
 
@@ -58,7 +60,9 @@ Environment variables：`NAS_HOST`、`NAS_USER`、`NAS_HEALTH_URL`，可選
 `authorized_keys` entry 應包含 `restrict`、`no-agent-forwarding`、`no-port-forwarding`、
 `no-pty`、`no-user-rc` 與固定 `command=".../contexthub-deploy-wrapper.sh"`。
 
-在 NAS 以 owner SSH terminal 安裝（target 必須是 root-owned filesystem）：
+以下自訂 wrapper 安裝是尚未完成的自動化設計。日常 Codex deployment 不安裝或修改它，而是
+使用既有共享 `/usr/local/bin/deployment` gateway。若 owner 未來決定完成此方案，target 必須是
+root-owned filesystem：
 
 ```bash
 sudo -v
@@ -83,7 +87,10 @@ dispatcher 會拒絕非 root-owned engine。
 ## Release and deploy flow
 
 1. PR merge 到 `main`；`verify` 綠燈後 container job push `linux/amd64` GHCR image，並產生
-   digest、SBOM、GitHub provenance attestation 與 `ReleaseManifestV1`。
+   digest、SBOM、GitHub provenance attestation 與 AiHomePlatform `schemaVersion: 1` contract。
+   Contract 只包含 `serviceId`、repository、commit SHA、image digest、Compose path/checksum、
+   deployment project id 與 health path；它由 CI 產生並上傳為
+   `aihome-release-<full-commit-sha>` artifact 內的 `release-manifest.json`，不提交回同一 commit。
 2. 從 main workflow 取完整 SHA，在 Actions 手動執行 `ContextHub production deploy`，輸入
    `release_sha`。preflight 會確認 SHA 是 main ancestor、OCI version/revision 和 attestation
    都匹配。
@@ -91,8 +98,9 @@ dispatcher 會拒絕非 root-owned engine。
    key 呼叫 forced command。NAS 正式路徑使用 `--image repo@sha256:digest`，不在 NAS rebuild。
 4. NAS 依序 snapshot、read-only gate、recreate、health、reindex、restore drill、doctor；任何
    post-start failure 都保留 metadata evidence 並自動 rollback image，不自動 restore SQLite。
-5. 只有 log 出現 `DEPLOYMENT VERIFIED` 且 8788 health 的 version/build commit、projection、
-   restore drill、doctor 均匹配時，才算 `live_verified`。
+5. 只有 log 出現 `DEPLOYMENT VERIFIED`，8788 health 通過，且 `/health/ops` 的
+   `release.commit`／`release.imageDigest` 與部署請求一致時，才有 release 的
+   `live_verified` 證據。Backup、restore-test 與 secret adapter 仍各自依 endpoint 的保守狀態判定。
 
 CI/CD workflow uses pinned action commits and the production environment approval/concurrency
 boundary. GitHub's environment and artifact-attestation semantics are documented in the official

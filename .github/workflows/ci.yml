@@ -165,18 +165,14 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           RELEASE_DIGEST: ${{ steps.build.outputs.digest }}
-          RELEASE_VERSION: ${{ steps.package-version.outputs.version }}
           RELEASE_COMMIT: ${{ github.sha }}
-          CI_RUN_ID: ${{ github.run_id }}
-          CI_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          SBOM_ARTIFACT: contexthub-sbom-${{ github.run_id }}
           RELEASE_MANIFEST_OUT: artifacts/release-manifest.json
         run: npm run release:manifest
       - name: Upload release manifest
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: contexthub-release-${{ github.sha }}
+          name: aihome-release-${{ github.sha }}
           path: artifacts/release-manifest.json
           if-no-files-found: error
 

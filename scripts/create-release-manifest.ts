@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { parseReleaseManifest } from '../src/ops/release-contract.js';
 
@@ -8,21 +9,17 @@ function required(name: string): string {
   return value;
 }
 
-const digest = required('RELEASE_DIGEST');
+const composePath = 'compose.prod.yml';
 const manifest = parseReleaseManifest({
-  format: 'contexthub-release/v1',
+  schemaVersion: 1,
+  serviceId: 'contexthub',
   repository: 'cuweiwei/ContextHub',
-  ref: 'refs/heads/main',
-  version: required('RELEASE_VERSION'),
-  commit: required('RELEASE_COMMIT'),
-  image: `ghcr.io/cuweiwei/contexthub@${digest}`,
-  digest,
-  ci_run_id: required('CI_RUN_ID'),
-  ci_run_url: required('CI_RUN_URL'),
-  sbom_artifact: required('SBOM_ARTIFACT'),
-  provenance_subject: `cuweiwei/ContextHub@${required('RELEASE_COMMIT')}`,
-  deploy_contract_version: 1,
-  created_at: new Date().toISOString(),
+  commitSha: required('RELEASE_COMMIT'),
+  imageDigest: required('RELEASE_DIGEST'),
+  composePath,
+  composeSha256: createHash('sha256').update(fs.readFileSync(composePath)).digest('hex'),
+  deploymentProjectId: 'contexthub',
+  health: { path: '/health' },
 });
 
 const out = process.env.RELEASE_MANIFEST_OUT?.trim() || 'artifacts/release-manifest.json';

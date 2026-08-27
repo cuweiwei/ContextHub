@@ -4,7 +4,7 @@
 
 ## Evidence model
 
-截至 2026-08-20，`0.9.0@3ef8f8ce40a7d2746de31b44b00562d56e38fe20` 是最新已驗證且部署的 release snapshot：[main CI run 32332161336](https://github.com/cuweiwei/ContextHub/actions/runs/32332161336) 已通過 core、E2E、retrieval、browser、dependency／image scan，並產出 SBOM、provenance 與 `ReleaseManifestV1`；GHCR digest `sha256:a0517f05990a2419269bb210fd7c9bd23dc666242c9413f53fc0084114f49e45` 的 attestation 驗證通過。Owner 以 root-owned NAS deploy engine 部署該精確 digest；8788／8443 `/health` 回報相同 version／commit、schema 15、audit writable 與 projection ready，retrieval 37/37，backup manifest、isolated restore drill、doctor、rollback image 與 `DEPLOYMENT VERIFIED` evidence 均已產生，因此此 release 達到 `live_verified`。GitHub `production` environment 與自動 deploy workflow 的外部設定仍未完成，故自動部署路徑仍是 pending；也不能由 live health 反推真實 Codex／Claude／Hermes product client 已 `provider_verified`。
+Evidence 必須依時間與層級閱讀。2026-08-20 的 `0.9.0@3ef8f8ce40a7d2746de31b44b00562d56e38fe20` 是一筆已完成的歷史 deployment snapshot：[main CI run 32332161336](https://github.com/cuweiwei/ContextHub/actions/runs/32332161336) 通過當時 gates，immutable digest、attestation、8788／8443 health、schema 15、retrieval 37/37、backup、restore drill、doctor、rollback image 與 `DEPLOYMENT VERIFIED` evidence 齊全。2026-08-24 本輪 repo 掃描的 clean baseline 是 `da15783e91c3e5ec79d1afdf3507b59e96f981d3`，其 [main CI run 32583691873](https://github.com/cuweiwei/ContextHub/actions/runs/32583691873) 成功；本輪新增修改仍屬未 commit 的 `implemented_local`，且沒有重新查核或執行 production deployment，因此不能把歷史 snapshot 寫成「目前 running」。自動 deploy 仍未 `provider_verified`，真實 Codex／Claude／Hermes product clients 也仍未 `provider_verified`。
 
 功能狀態與證據分開記錄：
 
@@ -29,7 +29,7 @@
 7. **CHB-035｜GitHub Connector worker｜L｜implemented_local foundation / provider_verified pending / live_verified pending**：獨立 worker、repo/resource allowlist、pagination/checkpoint、retry、0600 token、metadata-only mapper 與 profile compose service 已完成；rename/archive/delete/visibility-loss reconciliation、fine-grained GitHub token 與 provider smoke 尚待補齊。
 8. **CHB-036｜Google Calendar worker｜L｜implemented_local foundation / provider_verified pending / live_verified pending**：calendar allowlist、incremental token、410 full-reconcile fallback、cancel/recurrence/timezone projection、0600 access token 與 profile compose service 已完成；OAuth refresh/revoke 與 provider smoke 尚待補齊。
 9. **CHB-037｜Control Center 真正 browser E2E｜M｜ready**：覆蓋 Tailscale identity、CSRF、session revoke、namespace switch、one-time enrollment、review conflict、policy simulation 與無權 404。
-10. **CHB-038｜Production observability｜M｜implemented_local foundation / provider_verified pending / live_verified pending**：health/release/deployment contracts 與 `production:drift` metadata-only detector 已完成；Control Center/NAS 顯示 backup/restore age、connector lag、dead letters、audit anchor 與 drift 告警仍待 production wiring。
+10. **CHB-038｜Production observability｜M｜implemented_local foundation / provider_verified pending / live_verified pending**：`/health/ops`、AiHomePlatform v2 release contract、deployment contract 與 `production:drift` metadata-only detector 已完成；backup／restore／secret adapters 仍誠實回報 unverified，Control Center/NAS 顯示 backup/restore age、connector lag、dead letters、audit anchor 與 drift 告警仍待 production wiring。
 
 ## P2 — 事件運行、Memory 品質與相容性（6–12 個月）
 
@@ -48,9 +48,10 @@
 
 ## Public contracts
 
-- `ReleaseManifestV1`：version、full commit、image/digest、CI run、SBOM artifact、provenance subject、deploy contract version。
+- AiHomePlatform release contract `schemaVersion: 1`：service/repository、full commit、image digest、Compose path/checksum、deployment project id 與 health path；只由 CI 產生 `aihome-release-<commit>` artifact，不提交 build 後 digest 回同一 commit。
+- `/health/ops`：唯讀且無敏感資訊，只回 release commit/digest、database readiness 與 backup/restore/secret adapter 的保守 evidence。
 - `DeploymentEvidenceV1`：workflow URL、digest、backup manifest、schema/retrieval model、health、restore drill、doctor、rollback image；禁止資料內容與 secrets。
-- `scripts/nas-deploy.sh --image <repo>@sha256:<digest> --expected-commit <sha> --expected-version <semver>`：immutable deployment path；`--ref` 僅為手動 recovery fallback。
+- `/usr/local/bin/deployment contexthub validate|deploy|status`：Codex 的 shared gateway production path；`scripts/nas-deploy.sh --ref` 僅為 owner recovery fallback。
 
 ## Definition of Done
 

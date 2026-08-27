@@ -6,29 +6,17 @@ const semver = z.string().regex(/^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$
 
 export const releaseManifestSchema = z
   .object({
-    format: z.literal('contexthub-release/v1'),
+    schemaVersion: z.literal(1),
+    serviceId: z.literal('contexthub'),
     repository: z.literal('cuweiwei/ContextHub'),
-    ref: z.literal('refs/heads/main'),
-    version: semver,
-    commit,
-    image: z.string().regex(/^ghcr\.io\/cuweiwei\/contexthub@sha256:[0-9a-f]{64}$/),
-    digest: sha256,
-    ci_run_id: z.string().regex(/^[0-9]+$/),
-    ci_run_url: z.string().regex(/^https:\/\/github\.com\/cuweiwei\/ContextHub\/actions\/runs\/[0-9]+$/),
-    sbom_artifact: z.string().min(1).max(200),
-    provenance_subject: z.string().min(1).max(300),
-    deploy_contract_version: z.literal(1),
-    created_at: z.string().datetime({ offset: true }),
+    commitSha: commit,
+    imageDigest: sha256,
+    composePath: z.literal('compose.prod.yml'),
+    composeSha256: z.string().regex(/^[0-9a-f]{64}$/),
+    deploymentProjectId: z.literal('contexthub'),
+    health: z.object({ path: z.literal('/health') }).strict(),
   })
-  .strict()
-  .superRefine((value, ctx) => {
-    if (value.image !== `ghcr.io/cuweiwei/contexthub@${value.digest}`) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['image'], message: 'image must contain the same digest as digest' });
-    }
-    if (!value.provenance_subject.includes(value.commit)) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['provenance_subject'], message: 'provenance subject must identify the release commit' });
-    }
-  });
+  .strict();
 
 export type ReleaseManifestV1 = z.infer<typeof releaseManifestSchema>;
 

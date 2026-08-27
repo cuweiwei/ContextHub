@@ -1,12 +1,14 @@
 services:
   contexthub:
-    image: ghcr.io/cuweiwei/contexthub@sha256:57f53a46212b26e98cb92e419a82bfb86a542471f85a78d0bce06a63e71d2e87
+    image: ghcr.io/cuweiwei/contexthub@${IMAGE_DIGEST:?IMAGE_DIGEST is required}
     container_name: contexthub
     restart: unless-stopped
     ports:
       - "${CONTEXTHUB_BIND_ADDRESS:-127.0.0.1}:${CONTEXTHUB_HOST_PORT:-8788}:8787"
     environment:
       ADMIN_TOKEN: ${ADMIN_TOKEN:?set ADMIN_TOKEN in .env}
+      AIHP_RELEASE_COMMIT: ${AIHP_RELEASE_COMMIT:-}
+      AIHP_IMAGE_DIGEST: ${AIHP_IMAGE_DIGEST:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       CONTROL_CENTER_ENABLED: "true"
       CONTROL_CENTER_TAILSCALE_AUTH_ENABLED: "true"

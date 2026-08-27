@@ -55,6 +55,34 @@ describe('REST API', () => {
     expect(res.json().disk_free_bytes).toBeUndefined();
   });
 
+  it('serves read-only, metadata-only operations evidence without auth', async () => {
+    const previousCommit = process.env.AIHP_RELEASE_COMMIT;
+    const previousDigest = process.env.AIHP_IMAGE_DIGEST;
+    const commit = 'a'.repeat(40);
+    const imageDigest = `sha256:${'b'.repeat(64)}`;
+    process.env.AIHP_RELEASE_COMMIT = commit;
+    process.env.AIHP_IMAGE_DIGEST = imageDigest;
+    try {
+      const res = await app.inject({ method: 'GET', url: '/health/ops' });
+      expect(res.statusCode).toBe(200);
+      expect(res.headers['cache-control']).toBe('no-store');
+      expect(res.json()).toEqual({
+        service: 'contexthub',
+        release: { commit, imageDigest },
+        database: { status: 'ready', schemaVersion: 16 },
+        backup: { status: 'unverified' },
+        restoreTest: { status: 'unverified' },
+        secretAdapter: { source: 'environment', verified: false },
+      });
+      expect(res.body).not.toContain(TEST_ADMIN_TOKEN);
+    } finally {
+      if (previousCommit === undefined) delete process.env.AIHP_RELEASE_COMMIT;
+      else process.env.AIHP_RELEASE_COMMIT = previousCommit;
+      if (previousDigest === undefined) delete process.env.AIHP_IMAGE_DIGEST;
+      else process.env.AIHP_IMAGE_DIGEST = previousDigest;
+    }
+  });
+
   it('serves a no-store reviewer UI without embedding credentials', async () => {
     const res = await app.inject({ method: 'GET', url: '/review' });
     expect(res.statusCode).toBe(200);

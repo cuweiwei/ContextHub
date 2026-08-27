@@ -1,8 +1,9 @@
 # NAS Deployment Runbook
 
-這是 ContextHub NAS 正式升級的唯一標準流程。未來 agent 不應自行拼接 `git pull`、
-`docker build`、backup 與 restart 命令；使用 `scripts/nas-deploy.sh`，並保留它產生的
-deployment evidence。
+這是 ContextHub NAS 正式升級的唯一標準流程。Codex 不應自行拼接 `git pull`、
+`docker build`、backup 與 restart 命令；正式變更只透過共享、root-owned、非互動的
+`/usr/local/bin/deployment` gateway。`scripts/nas-deploy.sh` 與 libexec engine 保留給 owner
+明確執行的歷史 recovery/evidence 流程，不是 agent 繞過 gateway 的替代入口。
 
 ## 固定邊界
 
@@ -14,17 +15,52 @@ deployment evidence。
 - production database 只從 app directory 的 `data/` 掛載。deploy script 不讀出 `.env`、
   不輸出 credential、不自動還原 database。
 - Docker host port 必須維持 `127.0.0.1`，Tailscale Serve 才是遠端入口。
+- Codex 只能上傳 repo 的 `compose.prod.yml` 到 project staging；不得寫入 production
+  `.env`、active Compose、`/etc/codex-deploy` 或 gateway 本身。
 
 ## Agent 執行前檢查
 
-1. 確認 feature branch 已合併到 `main`，PR CI 與合併後 `main` CI 都是綠燈。
-2. 記錄要部署的完整 commit SHA、`package.json` version 與 workflow URL。
-3. 確認 NAS production health 仍可達；不要用本機測試冒充 live health。
-4. 未收到 owner 明確的「deploy」授權時，只能執行 preflight。
-5. 不要求 owner 把 NAS 密碼貼到 chat。Synology sudo ticket 綁定 TTY；需要 sudo 時，owner
-   在自己的 SSH terminal 輸入密碼，agent 不保存也不轉送。
+1. 先執行 `ssh Tim@gnest 'sudo -n /usr/local/bin/deployment list'`；只有 exact
+   `contexthub` project id 存在才能繼續。
+2. 確認 feature branch 已合併到 `main`，PR CI 與合併後 `main` CI 都是綠燈。
+3. 記錄要部署的完整 commit SHA、`package.json` version、immutable image digest 與 workflow URL。
+4. 確認 NAS production health 仍可達；不要用本機測試冒充 live health。
+5. 所有 privileged gateway call 使用 `sudo -n`；失敗就立即停止，不要求或等待密碼。
 
-## 更新 deploy script
+## Codex 標準 gateway 流程
+
+`compose.prod.yml` 必須引用 CI 已發布的 immutable image，且不得包含 `build:`、host network、
+privileged、Docker socket 或非核准 bind root。然後依序執行：
+
+```bash
+ssh Tim@gnest \
+  'sudo -n /usr/local/bin/deployment list'
+
+scp -O compose.prod.yml \
+  Tim@gnest:/volume1/docker-deploy/staging/contexthub/compose.prod.yml
+
+ssh Tim@gnest \
+  'sudo -n /usr/local/bin/deployment contexthub validate'
+
+# 只有 owner 已明確授權 deployment 且 validate 成功後：
+ssh Tim@gnest \
+  'sudo -n /usr/local/bin/deployment contexthub deploy'
+
+ssh Tim@gnest \
+  'sudo -n /usr/local/bin/deployment contexthub status'
+```
+
+Validate 失敗只修 repo `compose.prod.yml`，重新 upload + validate；不得直接改 active production
+Compose。Deploy 後仍須核對 private 8788／8443 health 的 version、commit、schema、audit、
+projection，並保留 gateway/health evidence。若 gateway 支援且確實需要 rollback，使用
+`deployment contexthub rollback`，不得改用 direct Docker。
+
+## Owner recovery-only 流程
+
+以下 source worktree、`nas-deploy.sh`、libexec engine 與 `DEPLOYMENT VERIFIED` 流程只供 owner
+在明確 recovery 情境中使用。Codex 的一般 production deployment 到上一節為止。
+
+### 更新 recovery deploy script
 
 在 NAS source repository 使用明確的 `git -C`，避免更新到錯誤目錄：
 
@@ -37,10 +73,11 @@ git -C "$SOURCE_DIR" merge --ff-only origin/main
 若 tracked worktree 不乾淨或無法 fast-forward，停止部署並先處理差異；不得使用
 `git reset --hard` 或刪除 production artifacts。
 
-## Read-only preflight
+### Recovery read-only preflight
 
-正式 immutable release 先從成功的 main CI `ReleaseManifestV1` 取得 digest、commit、version 與
-workflow URL，再執行：
+正式 immutable release 先從成功的 main CI `aihome-release-<commit>` artifact 內
+`release-manifest.json` 取得 digest、commit、Compose checksum 與 health path；version 由該 commit
+的 `package.json` 取得，workflow URL 則保留該次 Actions run，再執行：
 
 ```bash
 bash /volume1/docker/contexthub/scripts/nas-deploy.sh \
@@ -71,7 +108,7 @@ bash /volume1/docker/contexthub/scripts/nas-deploy.sh \
 - target commit/version 可解析；
 - current production health 可達。
 
-## 一次完成部署
+### Recovery 一次完成部署
 
 Owner 在同一個 NAS SSH terminal 執行；`sudo -v` 與 deploy script 必須在同一個 TTY。GitHub
 production workflow 會使用下列 immutable image path；`--ref` 只給 owner 手動 recovery：

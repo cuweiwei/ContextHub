@@ -96,14 +96,16 @@ npm run cli -- policy-apply --namespace work --file /tmp/work-policy.json
 
 ## NAS 部署
 
-初次安裝可依下列 compose 步驟；既有 production 的正式升級不要手動組合 build/restart
-命令，請使用 [NAS Deployment Runbook](docs/NAS-DEPLOY-RUNBOOK.md) 與
-`scripts/nas-deploy.sh`。正式流程會拉取 CI 產生的 immutable GHCR digest、先建立 verified
-backup manifest、通過 read-only upgrade gate，才 recreate container，並自動執行 health、
-reindex、restore drill、doctor 與 image rollback。從 clean Git archive 在 NAS build 的
-`--ref` 路徑只保留給 owner 手動 recovery。
+初次安裝可依下列 compose 步驟；既有 production 的 Codex 正式升級只走 root-owned
+`/usr/local/bin/deployment` gateway：檢查 `ContextHub` allowlist、上傳 repo 的
+`compose.prod.yml` 到 staging、validate、deploy、status。不要直接改 root-owned production
+Compose，也不要直接執行 Docker。完整命令與驗收見
+[NAS Deployment Runbook](docs/NAS-DEPLOY-RUNBOOK.md)。`scripts/nas-deploy.sh` 與 libexec engine
+保留為歷史 owner-run recovery/evidence 路徑，不取代 shared gateway。
 
-正式 CI/CD 會從 main 建立公開 GHCR immutable digest、SBOM、provenance 與 release manifest；
+正式 CI/CD 會從 main 建立公開 GHCR immutable digest、SBOM、provenance，並把
+AiHomePlatform `schemaVersion: 1` release manifest 以
+`aihome-release-<commit>` artifact 發布（artifact 內路徑為 `release-manifest.json`）；
 owner approval、Tailscale ephemeral runner、受限 SSH 與外部設定見
 [CI/CD Runbook](docs/CI-CD-RUNBOOK.md)。NAS 正式 release 使用 `--image ...@sha256:<digest>`；
 `--ref` 的 Git archive build 僅保留給 owner 手動 recovery。
@@ -125,9 +127,15 @@ sudo /var/packages/Tailscale/target/bin/tailscale serve \
 
 curl http://<nas-tailscale-ip>:8788/health   # redacted readiness + version/schema/model metadata
 curl -k https://<nas-tailscale-name>:8443/health
+curl -k https://<nas-tailscale-name>:8443/health/ops # release coordinates + adapter evidence only
 docker compose exec contexthub node dist/cli.js reindex
 docker compose exec contexthub node dist/cli.js retrieval-status
 ```
+
+`/health/ops` 是免認證、唯讀、`no-store` 的 service-owned evidence endpoint。Release commit
+與 image digest 由 production Compose 的 `AIHP_RELEASE_COMMIT`／`AIHP_IMAGE_DIGEST` 注入；
+backup 與 restore-drill 雖有 owner-operated CLI，目前尚無已驗證的 AiHomePlatform adapter，
+secret 也仍由 root-owned environment 提供，因此這三項不會僅因 endpoint 可達而標成 verified。
 
 **備份**(每日 NAS 排程;WAL 下直接複製 `.db` 不是一致備份):
 

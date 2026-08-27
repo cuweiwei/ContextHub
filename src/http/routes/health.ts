@@ -4,6 +4,19 @@ import type { AppDeps } from '../server.js';
 import { buildInfo } from '../../build-info.js';
 
 const MIN_FREE_BYTES = 1_073_741_824;
+const RELEASE_COMMIT_RE = /^[0-9a-f]{40}$/i;
+const IMAGE_DIGEST_RE = /^sha256:[0-9a-f]{64}$/i;
+
+function releaseCommit(): string | null {
+  const configured = process.env.AIHP_RELEASE_COMMIT?.trim();
+  if (configured && RELEASE_COMMIT_RE.test(configured)) return configured;
+  return RELEASE_COMMIT_RE.test(buildInfo.build_commit) ? buildInfo.build_commit : null;
+}
+
+function imageDigest(): string | null {
+  const configured = process.env.AIHP_IMAGE_DIGEST?.trim();
+  return configured && IMAGE_DIGEST_RE.test(configured) ? configured : null;
+}
 
 /**
  * Unauthenticated liveness + degradation surface. Reports whether the audit
@@ -42,6 +55,31 @@ export function registerHealthRoutes(app: FastifyInstance, deps: AppDeps): void 
         retrieval_projection_ready: retrievalProjection.ready,
         disk: diskStatus,
       },
+    });
+  });
+
+  app.get('/health/ops', async (_req, reply) => {
+    const auditWritable = deps.auditRepo.writable();
+    const schemaRow = deps.db
+      .prepare('SELECT MAX(version) AS version, COUNT(*) AS count FROM schema_migrations')
+      .get() as { version: number | null; count: number };
+    const migrationsCurrent = schemaRow.version === buildInfo.schema_version && schemaRow.count === buildInfo.schema_version;
+
+    return reply.header('Cache-Control', 'no-store').send({
+      service: 'contexthub',
+      release: {
+        commit: releaseCommit(),
+        imageDigest: imageDigest(),
+      },
+      database: {
+        status: auditWritable && migrationsCurrent ? 'ready' : 'degraded',
+        schemaVersion: schemaRow.version,
+      },
+      // ContextHub has owner-operated CLI support, but no verified
+      // AiHomePlatform backup/restore adapter yet.
+      backup: { status: 'unverified' },
+      restoreTest: { status: 'unverified' },
+      secretAdapter: { source: 'environment', verified: false },
     });
   });
 }
