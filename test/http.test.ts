@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import type { GrantProfile } from '../src/core/policy.js';
 import type { PrincipalKind, Scope } from '../src/core/types.js';
+import { buildInfo } from '../src/build-info.js';
 import { buildTestEnv, TEST_ADMIN_TOKEN } from './helpers.js';
 
 const admin = { authorization: `Bearer ${TEST_ADMIN_TOKEN}` };
@@ -69,7 +70,7 @@ describe('REST API', () => {
       expect(res.json()).toEqual({
         service: 'contexthub',
         release: { commit, imageDigest },
-        database: { status: 'ready', schemaVersion: 16 },
+        database: { status: 'ready', schemaVersion: buildInfo.schema_version },
         backup: { status: 'unverified' },
         restoreTest: { status: 'unverified' },
         secretAdapter: { source: 'environment', verified: false },
