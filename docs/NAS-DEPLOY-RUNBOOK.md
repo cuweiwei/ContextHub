@@ -14,7 +14,9 @@
   source repo 內的 untracked deployment directory。
 - production database 只從 app directory 的 `data/` 掛載。deploy script 不讀出 `.env`、
   不輸出 credential、不自動還原 database。
-- Docker host port 必須維持 `127.0.0.1`，Tailscale Serve 才是遠端入口。
+- ContextHub 的主要 Docker host port `8788` 必須維持 `127.0.0.1`，Tailscale Serve 才是遠端入口；
+  `18788` 僅可綁 Docker host bridge，供 Personal AI safe-method projection 使用，不得綁 LAN/public
+  interface。
 - Codex 只能上傳 repo 的 `compose.prod.yml` 到 project staging；不得寫入 production
   `.env`、active Compose、`/etc/codex-deploy` 或 gateway 本身。
 

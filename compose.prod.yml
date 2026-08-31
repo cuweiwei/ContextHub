@@ -5,6 +5,9 @@ services:
     restart: unless-stopped
     ports:
       - "${CONTEXTHUB_BIND_ADDRESS:-127.0.0.1}:${CONTEXTHUB_HOST_PORT:-8788}:8787"
+      # Private ingress for the Personal AI container. This is bound only to
+      # Docker's host bridge; 8788 remains loopback/Tailscale-facing.
+      - "172.17.0.1:18788:8787"
     environment:
       ADMIN_TOKEN: ${ADMIN_TOKEN:?set ADMIN_TOKEN in .env}
       AIHP_RELEASE_COMMIT: ${AIHP_RELEASE_COMMIT:-}

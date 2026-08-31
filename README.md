@@ -116,6 +116,9 @@ cp .env.example .env
 # ADMIN_TOKEN 設為新隨機值；CONTEXTHUB_BIND_ADDRESS 保持 127.0.0.1。
 docker compose up -d --build
 
+# Personal AI 的 safe-method projection 另走僅 Docker host bridge 的
+# 172.17.0.1:18788；8788 仍只綁 NAS loopback，不對 LAN 開放。
+
 # Synology Tailscale 預設 userspace networking，Docker 不應直接綁 100.x IP。
 # Data plane：讓 MCP 與 legacy key 介面走 tailnet 的 8788/TCP：
 sudo /var/packages/Tailscale/target/bin/tailscale serve \
@@ -155,8 +158,9 @@ docker compose exec contexthub node dist/cli.js restore-drill \
 ```
 
 外出存取走 Tailscale,不開公網 port。ISP 固定公網 IP 不是必要條件；ContextHub
-容器只綁 NAS loopback，再由 Tailscale Serve 私網轉送；不能綁 `0.0.0.0` 或 NAS
-的公網 IP。
+的 8788 data/control 入口仍只綁 NAS loopback，再由 Tailscale Serve 私網轉送；
+18788 只綁 Docker host bridge，供 Personal AI 容器的 safe-method projection 使用，
+不能綁 `0.0.0.0` 或 NAS 的公網 IP。
 
 ## Agent 端:接上 MCP
 
@@ -236,7 +240,7 @@ src/
            #   history/audit/policies/clients/namespaces/changes/connectors/entities/migrations)
            #   + /explore + /review + Control Center + health
   mcp/     # MCP server(21 tools)+ Streamable HTTP 掛載(stateless,一 key 一 namespace)
-  db/      # SQLite+sqlite-vec 連線(synchronous=FULL、instance lock)+ migrations(v1–v15)
+  db/      # SQLite+sqlite-vec 連線(synchronous=FULL、instance lock)+ migrations(v1–v16)
   cli.ts   # client/policy/review/audit/OAuth/namespace portability/reindex/backup/restore/...
 scripts/   # e2e/retrieval、release manifest、upgrade gate、NAS deploy/maintenance
 test/      # 100+ tests:隔離/信任/政策/稽核 fail-closed/idempotency/一致性/還原邊界

@@ -45,6 +45,8 @@ describe('release and deployment contracts', () => {
       expect(composeText).toMatch(/image:\s+ghcr\.io\/cuweiwei\/contexthub@sha256:[0-9a-f]{64}/);
       expect(composeText).toContain('AIHP_RELEASE_COMMIT: ${AIHP_RELEASE_COMMIT:-}');
       expect(composeText).toContain('AIHP_IMAGE_DIGEST: ${AIHP_IMAGE_DIGEST:-}');
+      expect(composeText).toContain('172.17.0.1:18788:8787');
+      expect(composeText).not.toContain('0.0.0.0:18788:8787');
       expect(generated).toMatchObject({
         schemaVersion: 1,
         serviceId: 'contexthub',
