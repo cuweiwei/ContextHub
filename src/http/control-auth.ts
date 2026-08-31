@@ -42,6 +42,51 @@ export function tailscaleIdentity(req: FastifyRequest, config: Config): {
   };
 }
 
+function forwardHeader(req: FastifyRequest, name: string): string | null {
+  const value = req.headers[name];
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  return normalized && normalized.length <= 200 && !/[\r\n]/.test(normalized) ? normalized : null;
+}
+
+export function personalAiControlSession(
+  req: FastifyRequest,
+  config: Config,
+  principals: WebPrincipalsRepo,
+): ReturnType<WebSessionsRepo['getValid']> {
+  if (!config.controlCenterEnabled || !config.controlCenterTrustedProxy || !config.controlCenterPaiForwardAuthEnabled || !config.controlCenterPaiOrigin) return null;
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return null;
+  let expectedHost: string;
+  try {
+    const origin = new URL(config.controlCenterPaiOrigin);
+    if (origin.protocol !== 'https:') return null;
+    expectedHost = origin.host.toLowerCase();
+  } catch {
+    return null;
+  }
+  if (String(req.headers.host ?? '').toLowerCase() !== expectedHost) return null;
+  const verified = forwardHeader(req, 'x-pai-verified');
+  const ownerId = forwardHeader(req, 'x-pai-owner-id')?.toLowerCase() ?? null;
+  const sessionId = forwardHeader(req, 'x-pai-session-id');
+  const authTimeRaw = forwardHeader(req, 'x-pai-auth-time');
+  const requestId = forwardHeader(req, 'x-pai-request-id');
+  const authTime = Number(authTimeRaw);
+  if (verified !== '1' || !ownerId || !sessionId || !requestId || !Number.isFinite(authTime) || authTime <= 0 || authTime > Date.now() + 60_000) return null;
+  const principal = principals.getByIdentity('personal-ai', ownerId);
+  if (!principal || principal.disabled) return null;
+  principals.touch(principal.id);
+  const now = Date.now();
+  return {
+    id: `pai:${sessionId}`,
+    principalId: principal.id,
+    csrfHash: '',
+    createdAt: new Date(authTime).toISOString(),
+    idleExpiresAt: new Date(now + config.controlCenterSessionIdleMinutes * 60_000).toISOString(),
+    absoluteExpiresAt: new Date(now + config.controlCenterSessionMaxDays * 86_400_000).toISOString(),
+    principal,
+  };
+}
+
 export function readCookie(req: FastifyRequest, name: string): string | null {
   const raw = req.headers.cookie;
   if (!raw) return null;
@@ -54,7 +99,7 @@ export function readCookie(req: FastifyRequest, name: string): string | null {
 
 export function requireControlSession(req: FastifyRequest, reply: FastifyReply): boolean {
   if (!req.controlSession) {
-    reply.code(401).header('Cache-Control', 'no-store').send({ error: { code: 'control_unauthorized', message: 'Sign in through the private Tailscale HTTPS endpoint' } });
+    reply.code(401).header('Cache-Control', 'no-store').send({ error: { code: 'control_unauthorized', message: 'Sign in through an enrolled private HTTPS identity endpoint' } });
     return false;
   }
   return true;

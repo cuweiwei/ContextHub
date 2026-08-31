@@ -115,6 +115,8 @@ export function buildTestEnv(overrides: Partial<Config> = {}) {
     controlCenterTailscaleAuthEnabled: false,
     controlCenterTrustedProxy: false,
     controlCenterCanonicalOrigin: undefined,
+    controlCenterPaiForwardAuthEnabled: false,
+    controlCenterPaiOrigin: undefined,
     controlCenterSessionIdleMinutes: 480,
     controlCenterSessionMaxDays: 14,
     controlCenterFreshSessionMinutes: 5,

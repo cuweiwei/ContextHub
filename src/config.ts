@@ -27,6 +27,8 @@ const envSchema = z.object({
   CONTROL_CENTER_TAILSCALE_AUTH_ENABLED: envBoolean(false),
   CONTROL_CENTER_TRUSTED_PROXY: envBoolean(false),
   CONTROL_CENTER_CANONICAL_ORIGIN: optionalUrl,
+  CONTROL_CENTER_PAI_FORWARD_AUTH_ENABLED: envBoolean(false),
+  CONTROL_CENTER_PAI_ORIGIN: optionalUrl,
   CONTROL_CENTER_SESSION_IDLE_MINUTES: z.coerce.number().int().positive().default(480),
   CONTROL_CENTER_SESSION_MAX_DAYS: z.coerce.number().int().positive().default(14),
   CONTROL_CENTER_FRESH_SESSION_MINUTES: z.coerce.number().int().positive().default(5),
@@ -54,6 +56,8 @@ export interface Config {
   controlCenterTailscaleAuthEnabled: boolean;
   controlCenterTrustedProxy: boolean;
   controlCenterCanonicalOrigin: string | undefined;
+  controlCenterPaiForwardAuthEnabled: boolean;
+  controlCenterPaiOrigin: string | undefined;
   controlCenterSessionIdleMinutes: number;
   controlCenterSessionMaxDays: number;
   controlCenterFreshSessionMinutes: number;
@@ -71,6 +75,9 @@ export interface Config {
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const parsed = envSchema.parse(env);
+  if (parsed.CONTROL_CENTER_PAI_FORWARD_AUTH_ENABLED && (!parsed.CONTROL_CENTER_PAI_ORIGIN || new URL(parsed.CONTROL_CENTER_PAI_ORIGIN).protocol !== 'https:')) {
+    throw new Error('Personal AI forward-auth requires an HTTPS CONTROL_CENTER_PAI_ORIGIN');
+  }
   const dataDir = path.resolve(parsed.DATA_DIR);
   return {
     port: parsed.PORT,
@@ -84,6 +91,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     controlCenterTailscaleAuthEnabled: parsed.CONTROL_CENTER_TAILSCALE_AUTH_ENABLED,
     controlCenterTrustedProxy: parsed.CONTROL_CENTER_TRUSTED_PROXY,
     controlCenterCanonicalOrigin: parsed.CONTROL_CENTER_CANONICAL_ORIGIN,
+    controlCenterPaiForwardAuthEnabled: parsed.CONTROL_CENTER_PAI_FORWARD_AUTH_ENABLED,
+    controlCenterPaiOrigin: parsed.CONTROL_CENTER_PAI_ORIGIN,
     controlCenterSessionIdleMinutes: parsed.CONTROL_CENTER_SESSION_IDLE_MINUTES,
     controlCenterSessionMaxDays: parsed.CONTROL_CENTER_SESSION_MAX_DAYS,
     controlCenterFreshSessionMinutes: parsed.CONTROL_CENTER_FRESH_SESSION_MINUTES,

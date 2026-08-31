@@ -24,7 +24,7 @@ import { registerReviewUiRoutes } from './review-ui.js';
 import { registerExploreUiRoutes } from './explore-ui.js';
 import { registerControlRoutes } from './routes/control.js';
 import { registerControlUiRoutes } from './control-ui.js';
-import { readCookie } from './control-auth.js';
+import { personalAiControlSession, readCookie } from './control-auth.js';
 import { createWebPrincipalsRepo } from '../core/web-principals-repo.js';
 import { createWebSessionsRepo } from '../core/web-sessions-repo.js';
 import { createEnrollmentsRepo } from '../core/enrollments-repo.js';
@@ -56,7 +56,9 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   app.addHook('onRequest', async (req) => {
     req.client = resolveClient(req, deps.clientsRepo, deps.config.adminToken, deps.config.legacyApiKeysEnabled);
     const rawSession = readCookie(req, '__Host-contexthub_session');
-    req.controlSession = rawSession ? deps.webSessionsRepo.getValid(rawSession) : null;
+    req.controlSession = rawSession
+      ? deps.webSessionsRepo.getValid(rawSession)
+      : personalAiControlSession(req, deps.config, deps.webPrincipalsRepo);
     if (req.client && !req.client.isAdmin) deps.clientActivityRepo.authenticated(req.client.id);
   });
 
