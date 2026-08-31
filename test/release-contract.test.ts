@@ -29,7 +29,7 @@ describe('release and deployment contracts', () => {
     expect(() => parseReleaseManifest({ ...release(), unexpected: true })).toThrow();
   });
 
-  it('generates the AiHomePlatform contract with the checked-in Compose checksum', async () => {
+  it('generates the release contract with the checked-in Compose checksum', async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'contexthub-release-'));
     const output = path.join(directory, 'release-manifest.json');
     try {
@@ -41,9 +41,8 @@ describe('release and deployment contracts', () => {
       const compose = fs.readFileSync('compose.prod.yml');
       const composeText = compose.toString('utf8');
       const composeSha256 = createHash('sha256').update(compose).digest('hex');
-      expect(composeText.match(/@\$\{[A-Z][A-Z0-9_]*(?::[^}]*)?\}/g)).toEqual([
-        '@${IMAGE_DIGEST:?IMAGE_DIGEST is required}',
-      ]);
+      expect(composeText.match(/@\$\{[A-Z][A-Z0-9_]*(?::[^}]*)?\}/g) ?? []).toEqual([]);
+      expect(composeText).toMatch(/image:\s+ghcr\.io\/cuweiwei\/contexthub@sha256:[0-9a-f]{64}/);
       expect(composeText).toContain('AIHP_RELEASE_COMMIT: ${AIHP_RELEASE_COMMIT:-}');
       expect(composeText).toContain('AIHP_IMAGE_DIGEST: ${AIHP_IMAGE_DIGEST:-}');
       expect(generated).toMatchObject({
