@@ -7,8 +7,9 @@ or other mutations through forwarded browser identity.
 
 ## Trust boundary
 
-- The AIHomePlatform edge authenticates the owner on the Portal origin and
-  forwards identity headers only on the private loopback path.
+- The Personal AI private edge authenticates the owner on the canonical Portal
+  origin and forwards verified identity headers only on the private upstream
+  path.
 - ContextHub accepts those headers only when the feature is enabled, the
   request host equals `CONTROL_CENTER_PAI_ORIGIN`, and the method is `GET`,
   `HEAD`, or `OPTIONS`.
