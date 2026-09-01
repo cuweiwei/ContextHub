@@ -22,6 +22,7 @@ export function createPoliciesRepo(db: DB) {
        ON v.namespace = p.namespace AND v.version = p.current_version
      WHERE p.namespace = ?`,
   );
+  const selectCurrentVersion = db.prepare('SELECT current_version FROM policies WHERE namespace = ?');
   const cache = new Map<string, CurrentPolicy>();
 
   function clientIdsIn(namespace: string): Set<string> {
@@ -38,7 +39,15 @@ export function createPoliciesRepo(db: DB) {
 
   function getCurrent(namespace: string): CurrentPolicy | null {
     const cached = cache.get(namespace);
-    if (cached) return cached;
+    if (cached) {
+      // The admin CLI runs in a separate process and may update the policy
+      // without access to this repository's in-memory cache. Probe the
+      // monotonic version so a long-lived API process observes those changes
+      // without requiring a container restart.
+      const currentVersion = selectCurrentVersion.get(namespace) as { current_version: number } | undefined;
+      if (currentVersion?.current_version === cached.version) return cached;
+      cache.delete(namespace);
+    }
     const row = selectCurrent.get(namespace) as
       | { namespace: string; version: number; rules: string }
       | undefined;

@@ -96,6 +96,28 @@ describe('policy engine & trusted lifecycle (commands layer)', () => {
       const v1 = env.policiesRepo.getVersion('personal', 1);
       expect(v1).not.toBeNull(); // the seed version is still retrievable
     });
+
+    it('refreshes a cached policy after an external CLI-style version update', () => {
+      const { auth } = env.newClient({ id: 'external-policy-agent', principalKind: 'agent', profile: 'none' });
+      const cached = env.policiesRepo.getCurrent('personal')!;
+      expect(cached.policy.grants.some((grant) => grant.client_id === auth.id)).toBe(false);
+
+      const nextVersion = cached.version + 1;
+      const nextPolicy = {
+        ...cached.policy,
+        grants: [...cached.policy.grants, { client_id: auth.id, capabilities: ['memory.read_accepted'] }],
+      };
+      // Simulate the documented CLI, which updates SQLite in a separate
+      // process and cannot call policiesRepo.invalidate() in this process.
+      env.db
+        .prepare('INSERT INTO policy_versions (namespace, version, rules, created_at, created_by) VALUES (?, ?, ?, ?, ?)')
+        .run('personal', nextVersion, JSON.stringify(nextPolicy), new Date().toISOString(), ADMIN_CLIENT.id);
+      env.db.prepare('UPDATE policies SET current_version = ? WHERE namespace = ?').run(nextVersion, 'personal');
+
+      const refreshed = env.policiesRepo.getCurrent('personal')!;
+      expect(refreshed.version).toBe(nextVersion);
+      expect(refreshed.policy.grants.some((grant) => grant.client_id === auth.id)).toBe(true);
+    });
   });
 
   describe('acceptance metadata & caller-supplied trust claims', () => {
