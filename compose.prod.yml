@@ -46,4 +46,6 @@ services:
 
 networks:
   personal-ai-network:
-    external: true
+    # This service creates the shared private bridge on first v2 cutover;
+    # PersonalAiControlPlane and Hermes join the same explicitly named bridge.
+    name: personal-ai-network
