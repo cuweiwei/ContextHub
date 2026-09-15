@@ -91,7 +91,7 @@ Agent runtime 負責目前 session 的 system/security instructions、使用者�
 
 Control Center 的 Web principal、session、principal-to-human-client links、agent enrollment 與 activity projection 由 migration v8 新增。`web_principals.control_admin` 只授予管理平面能力；Memory／Review 仍解析 linked human client 後呼叫既有 `commands` 與 policy/ACL/audit。Enrollment code 與 session/CSRF secret 僅保存 hash，raw 值只在必要 response 出現一次。
 
-Migration v10–v14 增加 audit hash chain、migration campaign／namespace portability metadata、change delivery／notification operational state、entity graph／consolidation projection 與 connector run metadata。Migration v15 增加 nullable `claim_key` 與 current-claim index，供 Federation v1 表達單一 winner identity；不加 unique constraint，讓既有矛盾可被 compiler 揭露與 reviewer 裁決。這些新增表／欄位不改變權威邊界：Memory 仍只以 SQLite `context_items` 為權威，graph、embedding、facet 與 analytics 仍是可重建 projection；connector 只能經 allowlist 與 `core/commands.ts` 寫入最小化投影。
+Migration v10–v14 增加 audit hash chain、migration campaign／namespace portability metadata、change delivery／notification operational state、entity graph／consolidation projection 與 connector run metadata。Migration v15 增加 nullable `claim_key` 與 current-claim index，供 Federation v1 表達單一 winner identity；不加 unique constraint，讓既有矛盾可被 compiler 揭露與 reviewer 裁決。Migration v16 增加 binary vector coarse projection、normalized entity-term projection，以及 graph／consolidation generation state；它們全都可由 `context_items` 重建，不是第二權威。這些新增表／欄位不改變權威邊界：Memory 仍只以 SQLite `context_items` 為權威，graph、embedding、facet 與 analytics 仍是可重建 projection；connector 只能經 allowlist 與 `core/commands.ts` 寫入最小化投影。
 
 **一 key 一 namespace**:credential 本身就是 namespace 邊界。Claude Code 要同時用個人與工作記憶,就設兩個 MCP 連線(兩把 key)。namespace 與 source 一樣由 server 從認證身分決定,request body 傳什麼都沒用。
 

@@ -29,6 +29,22 @@ describe('connector worker runtime', () => {
     expect(rest.recordRun).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed' }), expect.any(String));
   });
 
+  it('uses content-derived batch keys so changed provider pages cannot replay stale idempotency results', async () => {
+    const first = client();
+    const second = client();
+    const options = (rest: ConnectorRestClient, title: string) => ({
+      connector: 'github', checkpointKey: 'github:repo:issues', client: rest,
+      fetchPage: async () => ({ items: [{ id: 1, title }], nextCursor: null, complete: true, checkpointValue: 'done' }),
+      map: (item: { id: number; title: string }) => ({ type: 'github_issue', title: item.title, source_item_id: String(item.id), idempotency_key: `${item.id}:${item.title}` }),
+      sleep: async () => undefined,
+    });
+    await runConnectorWorker(options(first, 'old'));
+    await runConnectorWorker(options(second, 'new'));
+    const firstKey = (first.upsertBatch as ReturnType<typeof vi.fn>).mock.calls[0]?.[1];
+    const secondKey = (second.upsertBatch as ReturnType<typeof vi.fn>).mock.calls[0]?.[1];
+    expect(firstKey).not.toBe(secondKey);
+  });
+
   it('normalizes operational state responses and omits null optimistic revisions', async () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const rest = new ConnectorRestClient('http://hub.test', 'chk_test', async (input, init) => {
@@ -38,5 +54,7 @@ describe('connector worker runtime', () => {
     await expect(rest.getOperationalState('connector.github:repo')).resolves.toMatchObject({ value: { cursor: 'next' }, revision: 4 });
     await rest.putOperationalState('connector.github:repo', { cursor: 'next' }, 'checkpoint/v1', null, 'idem-1');
     expect(JSON.parse(String(requests[1]?.init?.body))).not.toHaveProperty('expected_revision');
+    expect(requests[0]?.init).toMatchObject({ redirect: 'manual' });
+    expect(requests[0]?.init?.signal).toBeInstanceOf(AbortSignal);
   });
 });

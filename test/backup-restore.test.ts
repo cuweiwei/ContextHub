@@ -131,7 +131,7 @@ describe('backup / restore / reindex on a real file database', () => {
     expect(manifest.runtime.schema_version).toBe(1);
   });
 
-  it('snapshots a v6 database before migration v7 and restores plus reindexes that snapshot', () => {
+  it('snapshots a missing v7 projection before repair and restores plus reindexes that snapshot', () => {
     const dbFile = path.join(dir, 'upgrade.db');
     const db = openDatabase(dbFile);
     const repo = createItemsRepo(db);
@@ -145,14 +145,29 @@ describe('backup / restore / reindex on a real file database', () => {
       'app',
       ACCEPT_TRUST,
     ).item;
-    // Simulate the exact schema state immediately before migration v7.
-    db.exec('DROP TABLE item_embeddings; DELETE FROM schema_migrations WHERE version = 7');
+    // Simulate a database whose v7 projection and dependent v16 projection
+    // metadata both need repair. Keeping a v16 migration marker after
+    // dropping the v7 table would describe an impossible partial schema.
+    db.exec(`
+      DROP TRIGGER context_items_projection_insert;
+      DROP TRIGGER context_items_projection_update;
+      DROP TRIGGER context_items_projection_delete;
+      DROP TRIGGER insight_evidence_projection_insert;
+      DROP TRIGGER insight_evidence_projection_update;
+      DROP TRIGGER insight_evidence_projection_delete;
+      DROP INDEX idx_entity_graph_alias_lookup;
+      DROP INDEX idx_entity_graph_edges_to;
+      DROP TABLE derived_projection_state;
+      DROP TABLE item_entity_term_index;
+      DROP TABLE item_embeddings;
+      DELETE FROM schema_migrations WHERE version IN (7, 16);
+    `);
     db.close();
 
     const upgraded = openDatabase(dbFile);
     const upgradeBackups = fs
       .readdirSync(path.join(dir, 'backups'))
-      .filter((name) => name.startsWith('pre-migration-v7-'));
+      .filter((name) => name.startsWith('pre-migration-v16-'));
     expect(upgradeBackups).toHaveLength(1);
     upgraded.close();
 

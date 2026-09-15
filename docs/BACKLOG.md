@@ -26,17 +26,19 @@ Evidence 必須依時間與層級閱讀。2026-08-20 的 `0.9.0@3ef8f8ce40a7d274
 
 ## P1 — Provider worker、Owner UX 與 production observability（2–6 個月）
 
-7. **CHB-035｜GitHub Connector worker｜L｜implemented_local foundation / provider_verified pending / live_verified pending**：獨立 worker、repo/resource allowlist、pagination/checkpoint、retry、0600 token、metadata-only mapper 與 profile compose service 已完成；rename/archive/delete/visibility-loss reconciliation、fine-grained GitHub token 與 provider smoke 尚待補齊。
+7. **CHB-035｜GitHub Connector worker｜L｜implemented_local foundation / provider_verified pending / live_verified pending**：獨立 worker、repo/resource allowlist、每輪 page-1 + issues `since` 增量、content-derived batch idempotency、timeout、retry、0600 token、metadata-only mapper 與 profile compose service已完成；rename/archive/delete/visibility-loss reconciliation、fine-grained GitHub token 與 provider smoke 尚待補齊。
 8. **CHB-036｜Google Calendar worker｜L｜implemented_local foundation / provider_verified pending / live_verified pending**：calendar allowlist、incremental token、410 full-reconcile fallback、cancel/recurrence/timezone projection、0600 access token 與 profile compose service 已完成；OAuth refresh/revoke 與 provider smoke 尚待補齊。
-9. **CHB-037｜Control Center 真正 browser E2E｜M｜ready**：覆蓋 Tailscale identity、CSRF、session revoke、namespace switch、one-time enrollment、review conflict、policy simulation 與無權 404。
+9. **CHB-037｜Control Center 真正 browser E2E｜M｜implemented_local foundation**：真 Chromium 已覆蓋臨時 DB bootstrap、Tailscale identity、Secure session、`/v1/control/me`、Memories table 與 Settings 導航；CSRF mutation、session revoke、namespace switch、one-time enrollment、review conflict、policy simulation 與無權 404 仍由 Fastify tests 覆蓋，尚待逐步搬進 browser gate。
 10. **CHB-038｜Production observability｜M｜implemented_local foundation / provider_verified pending / live_verified pending**：`/health/ops`、AiHomePlatform v2 release contract、deployment contract 與 `production:drift` metadata-only detector 已完成；backup／restore／secret adapters 仍誠實回報 unverified，Control Center/NAS 顯示 backup/restore age、connector lag、dead letters、audit anchor 與 drift 告警仍待 production wiring。
 
 ## P2 — 事件運行、Memory 品質與相容性（6–12 個月）
 
-11. **CHB-039｜Change delivery operations｜M｜implemented_local foundation / provider_verified pending / live_verified pending**：HTTPS host allowlist、metadata-only payload、retry/dead-letter 與 safe error-code 已覆蓋；簽章輪替、pause/resume、inspect/replay API 與 NAS alert wiring 尚待完成。
-12. **CHB-040｜Memory re-verification queue｜L｜proposed**：依 freshness、outcome、conflict、successor 產生 reviewer queue；永不自動改動 accepted Memory。
-13. **CHB-041｜Portability recovery drill｜M｜proposed**：以合成資料定期驗證 namespace export/import/dry-run/rollback、checksum、版本與 audit；不建立第二權威。
-14. **CHB-042｜Agent Memory Federation v1 與 compatibility matrix｜M｜implemented_local / live_verified / provider_verified pending**：schema v15 `claim_key`、pointer-only local cache contract、conflict-safe compiler、MCP instructions，以及 OpenAI／Anthropic／Hermes target 的 session、cache refresh、candidate、successor、conflict exclusion、namespace isolation 本機 contract tests 已完成，且 Federation release 已部署並通過 NAS evidence。仍須用真實 Codex、Claude、Hermes clients 分別驗證 legacy/enrollment initialize、instructions 與完整流程；不得把本機 MCP SDK 測試或 production health 當成 product client provider evidence，也不提前啟用 P3 OAuth。
+11. **CHB-039｜Change delivery operations｜M｜implemented_local foundation / provider_verified pending / live_verified pending**：HTTPS host allowlist、metadata-only payload、原子 lease、重入合併、provider timeout、manual redirect、retry/dead-letter、safe error-code 與 graceful shutdown 已覆蓋；簽章輪替、pause/resume、inspect/replay API 與 NAS alert wiring 尚待完成。
+12. **CHB-043｜Audit append scalability 與 readiness｜M｜implemented_local**：啟動／doctor 保留 full-chain verification，每筆 append 改為 constant-time verified-tail guard；health 會把 invalid startup/tail chain 報 degraded。待 main CI 與 production upgrade 後才可提升 evidence。
+13. **CHB-044｜Derived projection 與 100k retrieval gate｜M｜implemented_local / synthetic scale gate passed**：schema v16 加入 binary/Hamming coarse projection、exact cosine re-score、entity-term index、graph／consolidation generation state 與 scheduled 100k workflow；本機 synthetic 100k 的 Recall@5／Success@1／MRR 均為 0.833，hybrid p50 0.263 ms、p95 118.087 ms，通過 ≤250 ms gate。這不是 NAS 真實 corpus 或 production live evidence。
+14. **CHB-040｜Memory re-verification queue｜L｜proposed**：依 freshness、outcome、conflict、successor 產生 reviewer queue；永不自動改動 accepted Memory。
+15. **CHB-041｜Portability recovery drill｜M｜proposed**：以合成資料定期驗證 namespace export/import/dry-run/rollback、checksum、版本與 audit；不建立第二權威。
+16. **CHB-042｜Agent Memory Federation v1 與 compatibility matrix｜M｜implemented_local / historical live_verified / provider_verified pending**：schema v15 `claim_key`、pointer-only local cache contract、conflict-safe compiler、MCP instructions，以及 OpenAI／Anthropic／Hermes target 的 session、cache refresh、candidate、successor、conflict exclusion、namespace isolation本機 contract tests 已完成；歷史 Federation release 有 NAS evidence。仍須用真實 Codex、Claude、Hermes clients 分別驗證 legacy/enrollment initialize、instructions 與完整流程；不得把本機 MCP SDK 測試或 production health 當成 product client provider evidence，也不提前啟用 P3 OAuth。
 
 ## P3 — 只在量測 gate 通過後執行
 
@@ -44,7 +46,7 @@ Evidence 必須依時間與層級閱讀。2026-08-20 的 `0.9.0@3ef8f8ce40a7d274
 2. **CHB-021｜本地 Neural Embedding｜L｜deferred**：private eval 的 synonym/cross-language Recall@5 至少提升 5 個百分點、整體不退步超過 1 點、100k p95 ≤250 ms，才導入 on-device model。
 3. **CHB-026｜Gmail＋Drive Connector｜XL｜proposed / gated**：只送摘要、action/decision projection 與 `source_uri`；raw mail、attachment、document body、PII 不持久化。
 4. **CHB-027｜Passkey／Local OIDC 備援登入｜L｜proposed / gated**：只有 Tailscale identity 不足以支撐實際可用性才導入。
-5. **CHB-028｜ANN／vec0 partition｜L｜proposed / gated**：只有真實 100k corpus exact vector p95 超過 250 ms 才啟動 ADR。
+5. **CHB-028｜ANN／vec0 partition｜L｜deferred / gated**：本輪先以 ACL-first binary coarse + exact re-score 處理 synthetic 100k；只有真實 100k corpus 仍超過 250 ms 才啟動 ANN／vec0 partition ADR，避免用 global ANN 後過濾破壞授權語意。
 
 ## Public contracts
 

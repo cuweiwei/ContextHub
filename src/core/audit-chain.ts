@@ -23,6 +23,12 @@ export interface AuditChainStatus {
   verified: boolean;
 }
 
+export interface AuditTailStatus {
+  latest_audit_id: number;
+  root_hash: string;
+  verified: boolean;
+}
+
 function canonical(value: unknown): string {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
@@ -85,6 +91,51 @@ export function verifyAuditChain(db: Database.Database): AuditChainStatus {
     latest_audit_id: latest?.id ?? 0,
     root_hash: root,
     verified: stateMatches,
+  };
+}
+
+/**
+ * Constant-time integrity check for the mutable end of a chain that has
+ * already passed a full verification. This is intentionally not a substitute
+ * for startup/doctor verification: it protects each append from a missing or
+ * corrupted tail without re-reading the full immutable history.
+ */
+export function verifyAuditTail(db: Database.Database): AuditTailStatus {
+  const state = db.prepare('SELECT latest_audit_id, root_hash FROM audit_chain_state WHERE id = 1').get() as
+    | { latest_audit_id: number; root_hash: string }
+    | undefined;
+  const row = db.prepare(
+    'SELECT id, ts, namespace, client_id, action, item_id, outcome, details FROM audit_log ORDER BY id DESC LIMIT 1',
+  ).get() as AuditChainRow | undefined;
+  const link = db.prepare(
+    'SELECT audit_id, prev_hash, row_hash FROM audit_chain ORDER BY audit_id DESC LIMIT 1',
+  ).get() as { audit_id: number; prev_hash: string; row_hash: string } | undefined;
+
+  if (!row || !link) {
+    const empty = !row && !link && state?.latest_audit_id === 0 && state.root_hash === AUDIT_GENESIS_HASH;
+    return {
+      latest_audit_id: state?.latest_audit_id ?? 0,
+      root_hash: state?.root_hash ?? AUDIT_GENESIS_HASH,
+      verified: empty,
+    };
+  }
+
+  const previous = db.prepare(
+    'SELECT row_hash FROM audit_chain WHERE audit_id < ? ORDER BY audit_id DESC LIMIT 1',
+  ).get(link.audit_id) as { row_hash: string } | undefined;
+  const expectedPrevious = previous?.row_hash ?? AUDIT_GENESIS_HASH;
+  const expectedHash = auditRowHash(row, link.prev_hash);
+  const verified =
+    row.id === link.audit_id
+    && state?.latest_audit_id === row.id
+    && state.root_hash === link.row_hash
+    && link.prev_hash === expectedPrevious
+    && link.row_hash === expectedHash;
+
+  return {
+    latest_audit_id: row.id,
+    root_hash: link.row_hash,
+    verified,
   };
 }
 

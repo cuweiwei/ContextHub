@@ -793,6 +793,63 @@ const MIGRATIONS: {
     `,
   },
   {
+    version: 16,
+    name: 'derived-projection-generations',
+    sql: `
+      ALTER TABLE item_embeddings ADD COLUMN binary_embedding BLOB;
+
+      CREATE TABLE item_entity_term_index (
+        item_id TEXT NOT NULL REFERENCES context_items(id) ON DELETE CASCADE,
+        term TEXT NOT NULL,
+        PRIMARY KEY(item_id, term)
+      );
+      CREATE INDEX idx_item_entity_term ON item_entity_term_index(term, item_id);
+      INSERT OR IGNORE INTO item_entity_term_index (item_id, term)
+        SELECT item_id, entity FROM item_entity_index;
+      INSERT OR IGNORE INTO item_entity_term_index (item_id, term)
+        SELECT item_id, substr(entity, 1, instr(entity, ':') - 1)
+        FROM item_entity_index WHERE instr(entity, ':') > 1;
+      INSERT OR IGNORE INTO item_entity_term_index (item_id, term)
+        SELECT item_id, substr(entity, instr(entity, ':') + 1)
+        FROM item_entity_index WHERE instr(entity, ':') > 0 AND instr(entity, ':') < length(entity);
+
+      -- Keep startup health usable across the v15 -> v16 migration. The
+      -- normal post-upgrade reindex still rebuilds every projection from the
+      -- authoritative context_items table.
+      UPDATE item_embeddings SET binary_embedding = vec_quantize_binary(embedding);
+
+      CREATE TABLE derived_projection_state (
+        name TEXT PRIMARY KEY,
+        source_generation INTEGER NOT NULL DEFAULT 0,
+        built_generation INTEGER NOT NULL DEFAULT -1,
+        rebuilt_at TEXT
+      );
+      INSERT INTO derived_projection_state (name) VALUES ('entity_graph'), ('consolidation');
+
+      CREATE TRIGGER context_items_projection_insert AFTER INSERT ON context_items BEGIN
+        UPDATE derived_projection_state SET source_generation = source_generation + 1 WHERE name IN ('entity_graph', 'consolidation');
+      END;
+      CREATE TRIGGER context_items_projection_update AFTER UPDATE ON context_items BEGIN
+        UPDATE derived_projection_state SET source_generation = source_generation + 1 WHERE name IN ('entity_graph', 'consolidation');
+      END;
+      CREATE TRIGGER context_items_projection_delete AFTER DELETE ON context_items BEGIN
+        UPDATE derived_projection_state SET source_generation = source_generation + 1 WHERE name IN ('entity_graph', 'consolidation');
+      END;
+      CREATE TRIGGER insight_evidence_projection_insert AFTER INSERT ON insight_evidence BEGIN
+        UPDATE derived_projection_state SET source_generation = source_generation + 1 WHERE name = 'consolidation';
+      END;
+      CREATE TRIGGER insight_evidence_projection_update AFTER UPDATE ON insight_evidence BEGIN
+        UPDATE derived_projection_state SET source_generation = source_generation + 1 WHERE name = 'consolidation';
+      END;
+      CREATE TRIGGER insight_evidence_projection_delete AFTER DELETE ON insight_evidence BEGIN
+        UPDATE derived_projection_state SET source_generation = source_generation + 1 WHERE name = 'consolidation';
+      END;
+
+      CREATE INDEX idx_entity_graph_alias_lookup ON entity_graph_aliases(namespace, alias);
+      CREATE INDEX idx_entity_graph_edges_to ON entity_graph_edges(namespace, to_entity);
+    `,
+  },
+  {
     version: 17,
     name: 'radar-publication-ledger-and-source-withdrawal',
     sql: `

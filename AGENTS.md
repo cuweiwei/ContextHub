@@ -28,12 +28,12 @@
 
 ## NAS deployment
 
-- Follow `docs/NAS-DEPLOY-RUNBOOK.md`; do not assemble an ad-hoc production command sequence.
-- Keep the source Git worktree and production app/data directory explicit and separate. On the current NAS they may be a parent directory and an untracked child directory, so always use `git -C <source-dir>`.
-- Run `scripts/nas-deploy.sh --preflight-only` before requesting sudo. Only pass `--yes` after the owner explicitly authorizes deployment.
-- Never ask the owner to paste a sudo password, API key or `.env` value into chat. The owner authenticates `sudo -v` in the same NAS SSH TTY that runs the deploy script.
-- A deployment is complete only after `DEPLOYMENT VERIFIED`, live health version/commit matching, reindex, restore drill and doctor all pass. Preserve the emitted rollback image and metadata-only deployment report.
-- Do not bypass a failed backup, manifest, upgrade gate, health or doctor check. The deploy script may roll back an image, but database restore always requires separate owner authorization.
+- Follow `docs/NAS-DEPLOY-RUNBOOK.md`; Codex production changes use the shared root-owned `/usr/local/bin/deployment` gateway, never direct Docker or direct writes to root-owned production Compose.
+- Check `sudo -n /usr/local/bin/deployment list` first. Only an exact `contexthub` allowlist entry authorizes staging `compose.prod.yml`, validation, deploy, and status checks.
+- Upload only repository `compose.prod.yml` to `/volume1/docker-deploy/staging/contexthub/compose.prod.yml`; validate before deploy. All privileged calls use `sudo -n` and must fail non-interactively.
+- Never ask for a NAS password, sudo password, API key, or `.env` value. Production secrets and the active Compose remain root-controlled.
+- `scripts/nas-deploy.sh` and the libexec engine document the historical owner-run recovery/evidence path; do not substitute them for the shared gateway in an agent-driven production deployment.
+- A deployment is complete only after gateway status, live health version/commit, reindex, restore drill, and doctor evidence pass. Database restore always requires separate owner authorization.
 
 ## Done means
 

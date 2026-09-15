@@ -9,6 +9,7 @@ export interface GoogleCalendarWorkerOptions extends ConnectorWorkerConfig {
   calendars: string[];
   apiBaseUrl?: string;
   pageSize?: number;
+  requestTimeoutMs?: number;
 }
 
 interface CalendarCursor { syncToken?: string; pageToken?: string; fullReconcile?: boolean }
@@ -30,7 +31,11 @@ async function fetchCalendarPage(options: GoogleCalendarWorkerOptions, calendarI
   if (state.pageToken) url.searchParams.set('pageToken', state.pageToken);
   else if (state.syncToken) url.searchParams.set('syncToken', state.syncToken);
   if (state.fullReconcile) url.searchParams.set('timeMin', new Date(0).toISOString());
-  const response = await fetch(url, { headers: { accept: 'application/json', authorization: `Bearer ${options.accessToken}` } });
+  const response = await fetch(url, {
+    headers: { accept: 'application/json', authorization: `Bearer ${options.accessToken}` },
+    signal: AbortSignal.timeout(options.requestTimeoutMs ?? 15_000),
+    redirect: 'manual',
+  });
   if (!response.ok) throw apiError(response.status);
   const body = await response.json() as CalendarPage;
   const items = Array.isArray(body.items) ? body.items : [];

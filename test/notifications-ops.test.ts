@@ -36,4 +36,35 @@ describe('change delivery operations', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     db.close();
   });
+
+  it('leases a due delivery and coalesces overlapping dispatcher runs', async () => {
+    const db = openDatabase(':memory:'); const now = new Date('2026-08-20T00:00:00.000Z').toISOString();
+    db.prepare('INSERT INTO change_subscriptions (id, namespace, kind, endpoint, event_categories, status, created_by, created_at, updated_at, pending_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run('sub-3', 'personal', 'webhook', 'https://hooks.example.test/context', '["*"]', 'active', 'human-1', now, now, 1);
+    db.prepare('INSERT INTO change_deliveries (id, subscription_id, cursor, payload_metadata, status, attempts, next_attempt_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run('del-3', 'sub-3', null, '{"category":"connector.sync","severity":"info","count":1}', 'pending', 0, now, now);
+    let complete!: (response: Response) => void;
+    const fetchImpl = vi.fn().mockImplementation(() => new Promise<Response>((resolve) => { complete = resolve; }));
+    const dispatcher = new NotificationDispatcher(db, { allowedHosts: ['hooks.example.test'], signingMasterKey: 'master' }, fetchImpl);
+    const first = dispatcher.dispatchDue(new Date(now));
+    const overlapping = dispatcher.dispatchDue(new Date(now));
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    complete(new Response(null, { status: 204 }));
+    await expect(first).resolves.toEqual({ delivered: 1, failed: 0 });
+    await expect(overlapping).resolves.toEqual({ delivered: 1, failed: 0 });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect((fetchImpl.mock.calls[0]?.[1] as RequestInit).redirect).toBe('manual');
+    db.close();
+  });
+
+  it('bounds provider requests with a timeout', async () => {
+    const db = openDatabase(':memory:'); const now = new Date('2026-08-20T00:00:00.000Z').toISOString();
+    db.prepare('INSERT INTO change_subscriptions (id, namespace, kind, endpoint, event_categories, status, created_by, created_at, updated_at, pending_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run('sub-4', 'personal', 'webhook', 'https://hooks.example.test/context', '["*"]', 'active', 'human-1', now, now, 1);
+    db.prepare('INSERT INTO change_deliveries (id, subscription_id, cursor, payload_metadata, status, attempts, next_attempt_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run('del-4', 'sub-4', null, '{"category":"doctor","severity":"critical","count":1}', 'pending', 0, now, now);
+    const fetchImpl = vi.fn().mockImplementation((_url: Parameters<typeof fetch>[0], init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+    }));
+    const dispatcher = new NotificationDispatcher(db, { allowedHosts: ['hooks.example.test'], signingMasterKey: 'master', requestTimeoutMs: 5 }, fetchImpl);
+    await expect(dispatcher.dispatchDue(new Date(now))).resolves.toEqual({ delivered: 0, failed: 1 });
+    expect((db.prepare('SELECT last_error_code FROM change_deliveries WHERE id = ?').get('del-4') as { last_error_code: string }).last_error_code).toBe('timeout');
+    db.close();
+  });
 });

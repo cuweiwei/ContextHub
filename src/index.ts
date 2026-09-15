@@ -32,15 +32,23 @@ const controlCommands = createControlCommands({ commands, clientsRepo, auditRepo
 
 const app = buildApp({ db, config, itemsRepo, clientsRepo, policiesRepo, auditRepo, commands, webPrincipalsRepo, webSessionsRepo, enrollmentsRepo, clientActivityRepo, controlCommands });
 const notificationDispatcher = new NotificationDispatcher(db, { allowedHosts: config.webhookAllowedHosts ?? [], signingMasterKey: config.webhookSigningMasterKey });
-const notificationTimer = setInterval(() => { void notificationDispatcher.dispatchDue().catch(() => undefined); }, 60_000);
+const notificationTimer = setInterval(() => {
+  void notificationDispatcher.dispatchDue().catch((err) => {
+    app.log.error({ err }, 'notification dispatch failed');
+  });
+}, 60_000);
 notificationTimer.unref();
 
+let shuttingDown = false;
 async function shutdown(signal: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
   app.log.info(`${signal} received, shutting down`);
+  clearInterval(notificationTimer);
+  await notificationDispatcher.waitForIdle();
   await app.close();
   db.close();
   instanceLock.close();
-  clearInterval(notificationTimer);
   process.exit(0);
 }
 process.on('SIGINT', () => void shutdown('SIGINT'));

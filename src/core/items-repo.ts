@@ -38,6 +38,9 @@ import {
 const FTS_CANDIDATES = 500;
 const LIKE_CANDIDATES = 200;
 const VECTOR_CANDIDATES = 250;
+// Binary coarse search is deliberately oversampled 4x before exact cosine
+// re-scoring, preserving quality while avoiding a full float32 corpus scan.
+const VECTOR_COARSE_CANDIDATES = VECTOR_CANDIDATES * 4;
 const ENTITY_CANDIDATES = 200;
 const MAX_VECTOR_DISTANCE = 0.55;
 /** Reciprocal Rank Fusion constant (standard value from the RRF paper). */
@@ -45,6 +48,15 @@ const RRF_K = 60;
 /** Types whose relevance should NOT decay with age (durable knowledge). */
 const NO_DECAY_TYPES = new Set(['fact', 'state', 'contact', 'preference', 'memory']);
 const DEFAULT_INSIGHT_CONFIDENCE = 0.7;
+
+function binaryQuantize(vector: Float32Array): Buffer {
+  const packed = Buffer.alloc(Math.ceil(vector.length / 8));
+  for (let index = 0; index < vector.length; index += 1) {
+    const byteIndex = index >> 3;
+    if (vector[index]! > 0) packed[byteIndex] = (packed[byteIndex] ?? 0) | (1 << (index & 7));
+  }
+  return packed;
+}
 
 const TYPE_MEMORY_KIND: Readonly<Record<string, MemoryKind | undefined>> = {
   fact: 'fact',
@@ -407,16 +419,19 @@ export function createItemsRepo(
   const ftsDelete = db.prepare('DELETE FROM items_fts WHERE rowid = ?');
   const facetDelete = db.prepare('DELETE FROM item_tag_index WHERE item_id = ?');
   const entityDelete = db.prepare('DELETE FROM item_entity_index WHERE item_id = ?');
+  const entityTermDelete = db.prepare('DELETE FROM item_entity_term_index WHERE item_id = ?');
   const facetInsert = db.prepare('INSERT OR IGNORE INTO item_tag_index (item_id, tag) VALUES (?, ?)');
   const entityInsert = db.prepare('INSERT OR IGNORE INTO item_entity_index (item_id, entity) VALUES (?, ?)');
+  const entityTermInsert = db.prepare('INSERT OR IGNORE INTO item_entity_term_index (item_id, term) VALUES (?, ?)');
   const embeddingUpsert = db.prepare(`
-    INSERT INTO item_embeddings (item_id, model, dimensions, content_hash, embedding, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO item_embeddings (item_id, model, dimensions, content_hash, embedding, binary_embedding, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(item_id) DO UPDATE SET
       model = excluded.model,
       dimensions = excluded.dimensions,
       content_hash = excluded.content_hash,
       embedding = excluded.embedding,
+      binary_embedding = excluded.binary_embedding,
       updated_at = excluded.updated_at
   `);
   const embeddingDelete = db.prepare('DELETE FROM item_embeddings WHERE item_id = ?');
@@ -436,6 +451,7 @@ export function createItemsRepo(
   ): void {
     facetDelete.run(item.id);
     entityDelete.run(item.id);
+    entityTermDelete.run(item.id);
     // Operational state slots never enter the general read surfaces, so they
     // are not indexed either.
     if (item.state_kind === 'operational') {
@@ -445,7 +461,11 @@ export function createItemsRepo(
     const tags = canonicalTags(item.tags);
     const entities = canonicalEntities(item.entities);
     for (const tag of tags) facetInsert.run(item.id, tag);
-    for (const entity of entities) entityInsert.run(item.id, entity);
+    for (const entity of entities) {
+      entityInsert.run(item.id, entity);
+      const terms = [entity, ...(entity.match(/[\p{L}\p{N}_-]+/gu) ?? [])];
+      for (const term of new Set(terms)) entityTermInsert.run(item.id, term);
+    }
     ftsInsert.run(rowid, segmentCjk(item.title), segmentCjk(item.content), segmentCjk(tags.join(' ')));
     const vector = embeddingProvider.embedItem(item);
     if (vector.length !== embeddingProvider.dimensions) {
@@ -459,6 +479,7 @@ export function createItemsRepo(
       embeddingProvider.dimensions,
       embeddingProvider.contentHash(item),
       Buffer.from(vector.buffer, vector.byteOffset, vector.byteLength),
+      binaryQuantize(vector),
       new Date().toISOString(),
     );
   }
@@ -1375,6 +1396,7 @@ export function createItemsRepo(
     items: SearchResultItem[];
     fullItems: ContextItem[];
     totalMatched: number;
+    nextCursor?: string;
     retrieval: RetrievalDiagnostics;
   } {
     const started = performance.now();
@@ -1455,7 +1477,7 @@ export function createItemsRepo(
       // Lexical/entity hits already satisfy a bounded exact request. Avoid a
       // full authorized-corpus cosine scan in that case; retain vector search
       // for typo/semantic queries with no strong structured signal.
-      const strongLexical = sourceIds.lexical.size >= Math.min(opts.limit, 10);
+      const strongLexical = sourceIds.lexical.size > 0;
       const explicitEntity = Boolean(opts.entities?.length || opts.filters?.entity_filters?.length);
       for (const q of opts.queries) {
         if (!q.trim()) continue;
@@ -1473,43 +1495,47 @@ export function createItemsRepo(
           'e.dimensions = ?',
         ];
         const vectorBlob = Buffer.from(queryVector.buffer, queryVector.byteOffset, queryVector.byteLength);
-        const params: unknown[] = [vectorBlob, embeddingProvider.model, embeddingProvider.dimensions];
+        const binaryVector = binaryQuantize(queryVector);
+        const params: unknown[] = [binaryVector, embeddingProvider.model, embeddingProvider.dimensions];
         applyFilters(where, params, opts.filters, nowIso, access, opts.surface);
         const rows = db
           .prepare(
-            `SELECT ranked.* FROM (
-               SELECT i.*, vec_distance_cosine(e.embedding, ?) AS vector_distance
+            `WITH coarse AS MATERIALIZED (
+               SELECT e.item_id, vec_distance_hamming(vec_bit(e.binary_embedding), vec_bit(?)) AS coarse_distance
                FROM item_embeddings e JOIN context_items i ON i.id = e.item_id
                WHERE ${where.join(' AND ')}
-             ) ranked
+               ORDER BY coarse_distance, e.item_id DESC
+               LIMIT ?
+             ), ranked AS MATERIALIZED (
+               SELECT coarse.item_id, vec_distance_cosine(e.embedding, ?) AS vector_distance
+               FROM coarse JOIN item_embeddings e ON e.item_id = coarse.item_id
+             )
+             SELECT i.* FROM ranked JOIN context_items i ON i.id = ranked.item_id
              WHERE ranked.vector_distance <= ?
-             ORDER BY ranked.vector_distance, ranked.id DESC
+             ORDER BY ranked.vector_distance, i.id DESC
              LIMIT ?`,
           )
-          .all(...params, MAX_VECTOR_DISTANCE, VECTOR_CANDIDATES) as ItemRow[];
+          .all(...params, VECTOR_COARSE_CANDIDATES, vectorBlob, MAX_VECTOR_DISTANCE, VECTOR_CANDIDATES) as ItemRow[];
         accumulate(rows, 'vector', 0.85);
       }
 
       const inferredTerms = opts.queries.flatMap(
         (q) => q.normalize('NFKC').toLocaleLowerCase().match(/[\p{L}\p{N}_:-]{2,}/gu) ?? [],
       );
-      const entityTerms = [...new Set([...(opts.entities ?? []), ...inferredTerms])].slice(0, 20);
+      const entityTerms = [...new Set([
+        ...(opts.entities ?? []),
+        ...(sourceIds.lexical.size === 0 ? inferredTerms : []),
+      ])].slice(0, 20);
       for (const term of entityTerms) {
         const normalized = normalizeEntity(term);
         if (!normalized) continue;
-        const escaped = normalized.replace(/[\\%_]/g, (char) => `\\${char}`);
-        const where: string[] = [
-          `EXISTS (
-             SELECT 1 FROM item_entity_index entity
-             WHERE entity.item_id = i.id
-               AND (entity.entity = ? OR entity.entity LIKE ? ESCAPE '\\')
-           )`,
-        ];
-        const params: unknown[] = [normalized, `%${escaped}%`];
+        const where: string[] = ['entity.term = ?'];
+        const params: unknown[] = [normalized];
         applyFilters(where, params, opts.filters, nowIso, access, opts.surface);
         const rows = db
           .prepare(
-            `SELECT i.* FROM context_items i
+            `SELECT i.* FROM item_entity_term_index entity INDEXED BY idx_item_entity_term
+             JOIN context_items i ON i.id = entity.item_id
              WHERE ${where.join(' AND ')}
              ORDER BY COALESCE(i.last_verified_at, i.occurred_at, i.updated_at) DESC
              LIMIT ?`,
@@ -1529,6 +1555,7 @@ export function createItemsRepo(
       .sort((a, b) => b.score - a.score);
     const offset = opts.offset ?? 0;
     const top = scored.slice(offset, offset + opts.limit);
+    const nextCursor = offset + top.length < scored.length ? String(offset + top.length) : undefined;
     return {
       items: top.map(({ item, score, sources }) => ({
         ...toCompact(item, tokens),
@@ -1537,6 +1564,7 @@ export function createItemsRepo(
       })),
       fullItems: top.map(({ item }) => item),
       totalMatched: fused.size,
+      nextCursor,
       retrieval: {
         mode,
         embedding_model: mode === 'hybrid' ? embeddingProvider.model : null,
@@ -2076,6 +2104,7 @@ export function createItemsRepo(
       db.exec('DELETE FROM item_embeddings');
       db.exec('DELETE FROM item_tag_index');
       db.exec('DELETE FROM item_entity_index');
+      db.exec('DELETE FROM item_entity_term_index');
       const rows = db
         .prepare(
           `SELECT rowid, id, title, content, tags, entities, state_kind FROM context_items
@@ -2114,7 +2143,7 @@ export function createItemsRepo(
          FROM item_embeddings e JOIN context_items i ON i.id = e.item_id
          WHERE i.deleted = 0
            AND (i.state_kind IS NULL OR i.state_kind != 'operational')
-           AND e.model = ? AND e.dimensions = ?`,
+           AND e.model = ? AND e.dimensions = ? AND e.binary_embedding IS NOT NULL`,
       )
       .get(embeddingProvider.model, embeddingProvider.dimensions) as { n: number };
     const version = db.prepare('SELECT vec_version() AS version').get() as { version: string };

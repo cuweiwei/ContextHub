@@ -17,7 +17,18 @@ export function rebuildConsolidationQueue(db: DB): { created: number } {
   }
   const broken = db.prepare("SELECT ie.insight_id, i.namespace FROM insight_evidence ie JOIN context_items i ON i.id = ie.insight_id JOIN context_items ev ON ev.id = ie.evidence_id WHERE i.source_withdrawn_at IS NULL AND i.status != 'superseded' AND i.trust_state = 'accepted' AND (ev.source_withdrawn_at IS NOT NULL OR ev.trust_state IN ('revoked', 'rejected'))").all() as Array<{ insight_id: string; namespace: string }>;
   for (const row of broken) if (add(row.namespace, 'reverify', [row.insight_id], 'upstream evidence was revoked or rejected')) created += 1;
+  db.prepare("UPDATE derived_projection_state SET built_generation = source_generation, rebuilt_at = ? WHERE name = 'consolidation'")
+    .run(new Date().toISOString());
   return { created };
+}
+
+export function ensureConsolidationQueue(db: DB, now = new Date()): { rebuilt: boolean; created: number } {
+  const state = db.prepare("SELECT source_generation, built_generation, rebuilt_at FROM derived_projection_state WHERE name = 'consolidation'").get() as
+    | { source_generation: number; built_generation: number; rebuilt_at: string | null }
+    | undefined;
+  const stale = !state?.rebuilt_at || Date.parse(state.rebuilt_at) < now.getTime() - 60 * 60_000;
+  if (state && state.source_generation === state.built_generation && !stale) return { rebuilt: false, created: 0 };
+  return { rebuilt: true, ...rebuildConsolidationQueue(db) };
 }
 
 export function suggestionDigest(db: DB, namespace?: string) {

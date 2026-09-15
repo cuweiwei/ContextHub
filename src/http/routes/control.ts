@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import type { AppDeps } from '../server.js';
 import { hasJsonContentType, requireControlSession, sameOrigin, SESSION_COOKIE } from '../control-auth.js';
 import { sendError } from '../errors.js';
-import { IdempotencyConflictError } from '../../core/errors.js';
+import { IdempotencyConflictError, ValidationError } from '../../core/errors.js';
 import { SCOPES, SENSITIVITIES, PRINCIPAL_KINDS, INFORMATION_CLASSES, MEMORY_KINDS, STATUSES, TRUST_STATES, type ListFilters, type ValidityFilter } from '../../core/types.js';
 import { newItemSchema } from '../../core/types.js';
 import { runDoctor } from '../../core/maintenance.js';
@@ -96,6 +96,23 @@ function csv(value: unknown): string[] | undefined {
   return values.length ? values : undefined;
 }
 
+function controlLimit(value: unknown): number {
+  const parsed = z.coerce.number().int().min(1).max(100).safeParse(value ?? 50);
+  if (!parsed.success) throw new ValidationError('limit must be an integer between 1 and 100');
+  return parsed.data;
+}
+
+function safeReturnTo(value: unknown, canonicalOrigin: string | undefined): string {
+  if (typeof value !== 'string' || !value.startsWith('/') || value.startsWith('//') || /[\\\u0000-\u001f\u007f]/.test(value) || /%5c/i.test(value)) return '/dashboard';
+  try {
+    const base = canonicalOrigin ?? 'https://contexthub.invalid';
+    const resolved = new URL(value, base);
+    return resolved.origin === new URL(base).origin ? `${resolved.pathname}${resolved.search}${resolved.hash}` : '/dashboard';
+  } catch {
+    return '/dashboard';
+  }
+}
+
 function controlFilters(query: Record<string, unknown>): ListFilters {
   const valid = <T extends string>(value: string[] | undefined, allowed: readonly T[]): T[] | undefined => {
     const result = value?.filter((entry): entry is T => allowed.includes(entry as T));
@@ -172,8 +189,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: AppDeps): void
     const session = deps.webSessionsRepo.create(principal.id, deps.config.controlCenterSessionIdleMinutes, deps.config.controlCenterSessionMaxDays);
     deps.webPrincipalsRepo.touch(principal.id);
     deps.auditRepo.log({ namespace: '*', clientId: `web:${principal.id}`, action: 'web.session.create', outcome: 'allow', details: { provider: identity.provider } });
-    const requested = typeof (req.query as any).return_to === 'string' ? (req.query as any).return_to : '/dashboard';
-    const returnTo = /^\/(?!\/)/.test(requested) ? requested : '/dashboard';
+    const returnTo = safeReturnTo((req.query as any).return_to, deps.config.controlCenterCanonicalOrigin);
     return reply.header('Set-Cookie', `${SESSION_COOKIE}=${session.rawToken}; Path=/; HttpOnly; Secure; SameSite=Strict`).redirect(returnTo);
   });
 
@@ -240,14 +256,15 @@ export function registerControlRoutes(app: FastifyInstance, deps: AppDeps): void
     if (!client) return noStore(reply).code(403).send({ error: { code: 'namespace_unavailable', message: 'No linked human client has access to this namespace' } });
     try {
       const filters = controlFilters(q);
+      const limit = controlLimit(q.limit);
       const hash = cursorHash(q);
       const unpacked = q.cursor ? unpackCursor(String(q.cursor), hash) : null;
       if (q.cursor && !unpacked) return noStore(reply).code(400).send({ error: { code: 'invalid_cursor', message: 'cursor does not match the query or filters' } });
       const rawCursor = unpacked ?? undefined;
       if (q.q && rawCursor !== undefined && (!/^\d+$/.test(rawCursor) || Number(rawCursor) < 0)) return noStore(reply).code(400).send({ error: { code: 'invalid_cursor', message: 'search cursor is malformed' } });
       const result = q.q
-        ? deps.commands.search(client, { queries: [String(q.q)], filters, limit: Math.min(Number(q.limit ?? 50), 100), mode: q.mode === 'lexical' ? 'lexical' : 'hybrid', includeCandidates: q.include_candidates === 'true', offset: rawCursor ? Number(rawCursor) : 0 })
-        : deps.commands.listItems(client, { filters, limit: Math.min(Number(q.limit ?? 50), 100), cursor: rawCursor, sort: q.sort === 'occurred' ? 'occurred' : 'created', includeCandidates: q.include_candidates === 'true' });
+        ? deps.commands.search(client, { queries: [String(q.q)], filters, limit, mode: q.mode === 'lexical' ? 'lexical' : 'hybrid', includeCandidates: q.include_candidates === 'true', offset: rawCursor ? Number(rawCursor) : 0 })
+        : deps.commands.listItems(client, { filters, limit, cursor: rawCursor, sort: q.sort === 'occurred' ? 'occurred' : 'created', includeCandidates: q.include_candidates === 'true' });
       const next = 'nextCursor' in result ? result.nextCursor : undefined;
       return noStore(reply).send({ namespace: client.namespace, ...result, next_cursor: next ? packCursor(hash, next) : null });
     } catch (err) { return sendError(reply, err); }

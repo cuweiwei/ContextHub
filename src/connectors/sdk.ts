@@ -22,10 +22,20 @@ export interface ConnectorItem {
 }
 
 export class ConnectorRestClient {
-  constructor(private readonly baseUrl: string, private readonly apiKey: string, private readonly fetchImpl: typeof fetch = fetch) {}
+  constructor(
+    private readonly baseUrl: string,
+    private readonly apiKey: string,
+    private readonly fetchImpl: typeof fetch = fetch,
+    private readonly requestTimeoutMs = 15_000,
+  ) {}
 
   private async request(path: string, init: RequestInit = {}): Promise<any> {
-    const response = await this.fetchImpl(new URL(path, this.baseUrl), { ...init, headers: { authorization: `Bearer ${this.apiKey}`, 'content-type': 'application/json', ...(init.headers ?? {}) } });
+    const response = await this.fetchImpl(new URL(path, this.baseUrl), {
+      ...init,
+      signal: init.signal ?? AbortSignal.timeout(this.requestTimeoutMs),
+      redirect: 'manual',
+      headers: { authorization: `Bearer ${this.apiKey}`, 'content-type': 'application/json', ...(init.headers ?? {}) },
+    });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(`ContextHub connector request failed (${response.status})`);
     return body;

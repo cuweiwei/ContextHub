@@ -29,9 +29,19 @@ export function rebuildEntityGraph(db: DB): { nodes: number; aliases: number; ed
         db.prepare('INSERT OR IGNORE INTO entity_graph_nodes (namespace, entity_key, label, evidence_item_id, updated_at) VALUES (?, ?, ?, ?, ?)').run(row.namespace, entity, entity, row.id, new Date().toISOString()); nodes += 1;
       }
     }
+    db.prepare("UPDATE derived_projection_state SET built_generation = source_generation, rebuilt_at = ? WHERE name = 'entity_graph'")
+      .run(new Date().toISOString());
     return { nodes, aliases, edges };
   })();
   return run;
+}
+
+export function ensureEntityGraph(db: DB): { rebuilt: boolean; nodes: number; aliases: number; edges: number } {
+  const state = db.prepare("SELECT source_generation, built_generation FROM derived_projection_state WHERE name = 'entity_graph'").get() as
+    | { source_generation: number; built_generation: number }
+    | undefined;
+  if (state && state.source_generation === state.built_generation) return { rebuilt: false, nodes: 0, aliases: 0, edges: 0 };
+  return { rebuilt: true, ...rebuildEntityGraph(db) };
 }
 
 export interface GraphTraversal { nodes: Array<{ entity_key: string; label: string; evidence_item_id: string }>; edges: Array<{ from_entity: string; relation: string; to_entity: string; evidence_item_id: string }>; truncated: boolean }

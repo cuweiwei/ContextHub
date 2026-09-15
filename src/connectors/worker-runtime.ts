@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { ConnectorItem, ConnectorRunMetadata } from './sdk.js';
 import { ConnectorRestClient } from './sdk.js';
 
@@ -54,6 +55,11 @@ async function retry<T>(operation: () => Promise<T>, attempts: number, sleep: (m
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
+function batchIdempotencyKey(connector: string, checkpointKey: string, batch: ConnectorItem[]): string {
+  const digest = createHash('sha256').update(JSON.stringify(batch)).digest('hex');
+  return `${connector}:${checkpointKey}:batch:${digest}`;
+}
+
 /**
  * Provider-neutral worker loop. Provider adapters only return minimized items;
  * every write, checkpoint and run status still crosses the ContextHub REST
@@ -67,6 +73,7 @@ export async function runConnectorWorker<T>(options: ConnectorWorkerOptions<T>):
   let pages = 0;
   let items = 0;
   let checkpointValue: string | null = null;
+  let completed = false;
 
   try {
     while (pages < maxPages) {
@@ -76,16 +83,19 @@ export async function runConnectorWorker<T>(options: ConnectorWorkerOptions<T>):
       if (mapped.length > 0) {
         for (let offset = 0; offset < mapped.length; offset += 100) {
           const batch = mapped.slice(offset, offset + 100);
-          const idempotencyKey = `${options.connector}:${options.checkpointKey}:${page.nextCursor ?? 'complete'}:${offset}`;
+          const idempotencyKey = batchIdempotencyKey(options.connector, options.checkpointKey, batch);
           await retry(() => options.client.upsertBatch(batch, idempotencyKey), attempts, sleep);
         }
         items += mapped.length;
       }
       checkpointValue = page.checkpointValue ?? page.nextCursor ?? checkpointValue;
-      if (page.complete || page.nextCursor === null) break;
+      if (page.complete || page.nextCursor === null) {
+        completed = true;
+        break;
+      }
       cursor = page.nextCursor;
     }
-    if (pages >= maxPages) throw new Error('connector_page_limit_exceeded');
+    if (!completed && pages >= maxPages) throw new Error('connector_page_limit_exceeded');
     const metadata: ConnectorRunMetadata = { connector: options.connector, checkpoint_key: options.checkpointKey, checkpoint_value: checkpointValue, status: 'ok', counts: { pages, items } };
     await retry(() => options.client.recordRun(metadata, `${options.connector}:run:${checkpointValue ?? 'initial'}:${pages}:${items}`), attempts, sleep);
     if (options.saveCheckpoint) await retry(() => options.saveCheckpoint!(checkpointValue), attempts, sleep);

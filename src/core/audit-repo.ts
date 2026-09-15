@@ -1,6 +1,11 @@
 import type { DB } from '../db/connection.js';
 import { AuditUnavailableError } from './errors.js';
-import { appendAuditChainLink, verifyAuditChain, type AuditChainStatus } from './audit-chain.js';
+import {
+  appendAuditChainLink,
+  verifyAuditChain,
+  verifyAuditTail,
+  type AuditChainStatus,
+} from './audit-chain.js';
 
 /**
  * Append-only audit log. There is deliberately NO update or delete method —
@@ -27,11 +32,13 @@ export type AuditRepo = ReturnType<typeof createAuditRepo>;
 
 export function createAuditRepo(db: DB) {
   let lastWriteOk = true;
+  let chainReady = verifyAuditChain(db).verified;
 
   function assertChainReady(): void {
-    const missing = db.prepare(`SELECT COUNT(*) AS n FROM audit_log l LEFT JOIN audit_chain c ON c.audit_id = l.id WHERE c.audit_id IS NULL`).get() as { n: number };
-    if (missing.n > 0) throw new AuditUnavailableError('audit chain is incomplete — run audit-chain-extend before accepting new writes');
-    if (!verifyAuditChain(db).verified) throw new AuditUnavailableError('audit chain verification failed — refusing new writes until the owner restores or repairs it');
+    if (!chainReady || !verifyAuditTail(db).verified) {
+      chainReady = false;
+      throw new AuditUnavailableError('audit chain verification failed — refusing new writes until the owner restores or repairs it');
+    }
   }
 
   function write(entry: AuditEntry): void {
@@ -130,13 +137,17 @@ export function createAuditRepo(db: DB) {
     return rows.map((r) => ({ ...r, details: r.details ? JSON.parse(r.details) : null }));
   }
 
-  /** Health surface: did the most recent audit write succeed? */
+  /** Health surface: did the most recent write and the verified chain tail succeed? */
   function writable(): boolean {
-    return lastWriteOk;
+    if (!lastWriteOk || !chainReady) return false;
+    chainReady = verifyAuditTail(db).verified;
+    return chainReady;
   }
 
   function verifyChain(): AuditChainStatus {
-    return verifyAuditChain(db);
+    const status = verifyAuditChain(db);
+    chainReady = status.verified;
+    return status;
   }
 
   return { log, logDenySafe, query, writable, verifyChain };

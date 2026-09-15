@@ -15,7 +15,20 @@ describe('P1/P2 foundations', () => {
     audit.log({ namespace: 'personal', clientId: 'test', action: 'test', outcome: 'allow', details: { count: 1 } });
     expect(audit.verifyChain().verified).toBe(true);
     db.prepare('UPDATE audit_log SET action = ? WHERE id = 1').run('tampered');
-    expect(audit.verifyChain().verified).toBe(false); db.close();
+    expect(audit.writable()).toBe(false);
+    expect(audit.verifyChain().verified).toBe(false);
+    expect(() => audit.log({ namespace: 'personal', clientId: 'test', action: 'blocked', outcome: 'allow' })).toThrow(/audit chain verification failed/);
+    db.close();
+  });
+
+  it('detects a chain that was already invalid when the repository starts', () => {
+    const db = openDatabase(':memory:');
+    db.prepare('INSERT INTO audit_log (ts, namespace, client_id, action, outcome) VALUES (?, ?, ?, ?, ?)')
+      .run(new Date().toISOString(), 'personal', 'test', 'unchained', 'allow');
+    const audit = createAuditRepo(db);
+    expect(audit.writable()).toBe(false);
+    expect(() => audit.log({ namespace: 'personal', clientId: 'test', action: 'blocked', outcome: 'allow' })).toThrow(/audit chain verification failed/);
+    db.close();
   });
 
   it('keeps connector projections minimized', () => {

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
-import { buildTestEnv } from './helpers.js';
+import { newItemSchema } from '../src/core/types.js';
+import { buildTestEnv, idem } from './helpers.js';
 
 describe('Control Center web auth and enrollment', () => {
   let env: ReturnType<typeof buildTestEnv>;
@@ -43,6 +44,15 @@ describe('Control Center web auth and enrollment', () => {
     expect((await app.inject({ method: 'GET', url: '/v1/control/me' })).statusCode).toBe(401);
   });
 
+  it('rejects authority-confusing login return paths', async () => {
+    env.webPrincipalsRepo.add({ provider: 'tailscale', subject: 'owner@example.com', displayName: 'Owner', controlAdmin: true });
+    for (const returnTo of ['/\\evil.test', '/%5cevil.test', '//evil.test']) {
+      const res = await app.inject({ method: 'GET', url: `/auth/login?return_to=${encodeURIComponent(returnTo)}`, headers: proxyHeaders });
+      expect(res.statusCode).toBe(302);
+      expect(res.headers.location).toBe('/dashboard');
+    }
+  });
+
   it('creates a revocable HttpOnly session without storing a reviewer key in HTML', async () => {
     const { cookie } = await signedIn();
     const page = await app.inject({ method: 'GET', url: '/memories', headers: { cookie } });
@@ -62,6 +72,24 @@ describe('Control Center web auth and enrollment', () => {
     const logout = await app.inject({ method: 'POST', url: '/auth/logout', headers: { cookie, origin: 'https://hub.test', 'content-type': 'application/json', 'x-csrf-token': (await app.inject({ method: 'GET', url: '/v1/control/me', headers: { cookie } })).json().csrf_token }, payload: {} });
     expect(logout.statusCode).toBe(204);
     expect((await app.inject({ method: 'GET', url: '/v1/control/me', headers: { cookie } })).statusCode).toBe(401);
+  });
+
+  it('paginates hybrid memory search and rejects invalid limits', async () => {
+    const { cookie } = await signedIn();
+    env.seed('source-app', newItemSchema.parse({ type: 'note', title: 'Memory alpha', content: 'search page', idempotency_key: idem() }));
+    env.seed('source-app', newItemSchema.parse({ type: 'note', title: 'Memory beta', content: 'search page', idempotency_key: idem() }));
+    const first = await app.inject({ method: 'GET', url: '/v1/control/memories?namespace=personal&q=Memory&limit=1', headers: { cookie } });
+    expect(first.statusCode).toBe(200);
+    expect(first.json().items).toHaveLength(1);
+    expect(first.json().next_cursor).toEqual(expect.any(String));
+    const second = await app.inject({ method: 'GET', url: `/v1/control/memories?namespace=personal&q=Memory&limit=1&cursor=${encodeURIComponent(first.json().next_cursor)}`, headers: { cookie } });
+    expect(second.statusCode).toBe(200);
+    expect(second.json().items).toHaveLength(1);
+    expect(second.json().items[0].id).not.toBe(first.json().items[0].id);
+    for (const value of ['0', '101', 'nope', '1.5']) {
+      const invalid = await app.inject({ method: 'GET', url: `/v1/control/memories?namespace=personal&limit=${value}`, headers: { cookie } });
+      expect(invalid.statusCode).toBe(400);
+    }
   });
 
   it('separates control administration from namespace memory access and exchanges enrollment once', async () => {

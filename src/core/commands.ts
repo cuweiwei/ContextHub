@@ -34,8 +34,8 @@ import { ulid } from './ids.js';
 import { expandCjkQueries } from './cjk-variants.js';
 import { normalizeClaimKey } from './canonical.js';
 import { assertAllowedWebhook, deriveWebhookSecret, enqueueChangeNotification } from './notifications.js';
-import { rebuildEntityGraph, traverseEntityGraph } from './entity-graph.js';
-import { rebuildConsolidationQueue, suggestionDigest } from './consolidation.js';
+import { ensureEntityGraph, rebuildEntityGraph, traverseEntityGraph } from './entity-graph.js';
+import { ensureConsolidationQueue, rebuildConsolidationQueue, suggestionDigest } from './consolidation.js';
 import { createCampaign, migrationCampaignStatus, upsertCampaignSource } from './migration-campaigns.js';
 import { operationalAuditReport } from './audit-report.js';
 import {
@@ -1698,13 +1698,13 @@ export function createCommands(deps: CommandDeps) {
   function traverseGraph(client: ClientAuth, input: { entity: string; depth?: number }) {
     return readAudited(client, 'read.entity_graph', client.isAdmin ? null : 'memory.read_accepted', { depth: Math.min(3, input.depth ?? 2) }, (ctx) => {
       if (ctx.client.isAdmin) throw new ValidationError('entity graph traversal requires a namespace-bound client');
-      rebuildEntityGraph(db);
+      ensureEntityGraph(db);
       return traverseEntityGraph(db, itemsRepo, ctx.access, input.entity, input.depth ?? 2);
     });
   }
 
   function consolidation(client: ClientAuth, namespace?: string) {
-    return readAudited(client, 'read.consolidation_suggestions', client.isAdmin ? null : 'memory.read_accepted', { namespace: namespace ?? null }, (ctx) => { rebuildConsolidationQueue(db); return suggestionDigest(db, ctx.client.isAdmin ? namespace : ctx.client.namespace); });
+    return readAudited(client, 'read.consolidation_suggestions', client.isAdmin ? null : 'memory.read_accepted', { namespace: namespace ?? null }, (ctx) => { ensureConsolidationQueue(db); return suggestionDigest(db, ctx.client.isAdmin ? namespace : ctx.client.namespace); });
   }
 
   function createMigrationCampaign(client: ClientAuth, input: { namespace: string; name: string }, idempotencyKey: string) {

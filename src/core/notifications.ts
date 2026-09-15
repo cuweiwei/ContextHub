@@ -3,7 +3,12 @@ import fs from 'node:fs';
 import { URL } from 'node:url';
 import type { DB } from '../db/connection.js';
 
-export interface NotificationConfig { allowedHosts: string[]; signingMasterKey?: string }
+export interface NotificationConfig {
+  allowedHosts: string[];
+  signingMasterKey?: string;
+  requestTimeoutMs?: number;
+  leaseDurationMs?: number;
+}
 
 function read0600(file: string): string {
   const mode = fs.statSync(file).mode & 0o777;
@@ -40,7 +45,9 @@ export function enqueueChangeNotification(db: DB, input: { namespace: string; ca
 export const DELIVERY_RETRY_DELAYS_MS = [60_000, 5 * 60_000, 30 * 60_000, 2 * 3_600_000, 12 * 3_600_000];
 
 function safeErrorCode(value: string): string {
-  const match = value.toLowerCase().match(/(?:http_[0-9]{3}|timeout|aborted|notification_[a-z0-9_]+|provider_[a-z0-9_]+)/);
+  const normalized = value.toLowerCase();
+  if (normalized.includes('timeout')) return 'timeout';
+  const match = normalized.match(/(?:http_[0-9]{3}|aborted|notification_[a-z0-9_]+|provider_[a-z0-9_]+)/);
   return match?.[0] ?? 'notification_error';
 }
 
@@ -55,24 +62,60 @@ export function recordDeliveryFailure(db: DB, deliveryId: string, errorCode: str
 }
 
 export class NotificationDispatcher {
+  private activeDispatch: Promise<{ delivered: number; failed: number }> | null = null;
+
   constructor(private readonly db: DB, private readonly config: NotificationConfig, private readonly fetchImpl: typeof fetch = fetch) {}
 
-  async dispatchDue(now = new Date()): Promise<{ delivered: number; failed: number }> {
-    const due = this.db.prepare("SELECT d.id, d.subscription_id, d.payload_metadata, s.kind, s.endpoint FROM change_deliveries d JOIN change_subscriptions s ON s.id = d.subscription_id WHERE d.status IN ('pending', 'retry') AND d.next_attempt_at <= ? ORDER BY d.created_at LIMIT 100").all(now.toISOString()) as Array<{ id: string; subscription_id: string; payload_metadata: string; kind: string; endpoint: string | null }>;
+  dispatchDue(now = new Date()): Promise<{ delivered: number; failed: number }> {
+    if (this.activeDispatch) return this.activeDispatch;
+    const dispatch = this.runDue(now);
+    this.activeDispatch = dispatch;
+    const clearActive = () => {
+      if (this.activeDispatch === dispatch) this.activeDispatch = null;
+    };
+    void dispatch.then(clearActive, clearActive);
+    return dispatch;
+  }
+
+  async waitForIdle(): Promise<void> {
+    await this.activeDispatch;
+  }
+
+  private claimDue(now: Date): Array<{ id: string; subscription_id: string; payload_metadata: string; kind: string; endpoint: string | null }> {
+    const dueAt = now.toISOString();
+    const leaseUntil = new Date(now.getTime() + (this.config.leaseDurationMs ?? 30 * 60_000)).toISOString();
+    return this.db.transaction(() => {
+      const candidates = this.db.prepare("SELECT d.id, d.subscription_id, d.payload_metadata, s.kind, s.endpoint FROM change_deliveries d JOIN change_subscriptions s ON s.id = d.subscription_id WHERE d.status IN ('pending', 'retry') AND d.next_attempt_at <= ? ORDER BY d.created_at LIMIT 100").all(dueAt) as Array<{ id: string; subscription_id: string; payload_metadata: string; kind: string; endpoint: string | null }>;
+      const claim = this.db.prepare("UPDATE change_deliveries SET next_attempt_at = ? WHERE id = ? AND status IN ('pending', 'retry') AND next_attempt_at <= ?");
+      return candidates.filter((delivery) => claim.run(leaseUntil, delivery.id, dueAt).changes === 1);
+    })();
+  }
+
+  private async runDue(now: Date): Promise<{ delivered: number; failed: number }> {
+    const due = this.claimDue(now);
     let delivered = 0; let failed = 0;
     for (const delivery of due) {
       try {
         const body = delivery.payload_metadata;
+        const requestOptions = {
+          signal: AbortSignal.timeout(this.config.requestTimeoutMs ?? 15_000),
+          redirect: 'manual' as const,
+        };
         let response: Response;
         if (delivery.kind === 'webhook' && delivery.endpoint && this.config.signingMasterKey) {
           const url = assertAllowedWebhook(delivery.endpoint, this.config); const signature = createHmac('sha256', deriveWebhookSecret(delivery.subscription_id, this.config.signingMasterKey)).update(body).digest('hex');
-          response = await this.fetchImpl(url, { method: 'POST', headers: { 'content-type': 'application/json', 'x-contexthub-signature': `sha256=${signature}` }, body });
+          response = await this.fetchImpl(url, { ...requestOptions, method: 'POST', headers: { 'content-type': 'application/json', 'x-contexthub-signature': `sha256=${signature}` }, body });
         } else if (delivery.kind === 'telegram') {
           const token = read0600(process.env.TELEGRAM_BOT_TOKEN_FILE ?? ''); const chatId = read0600(process.env.TELEGRAM_CHAT_ID_FILE ?? '');
-          response = await this.fetchImpl(`https://api.telegram.org/bot${token}/sendMessage`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chat_id: chatId, text: `ContextHub notification: ${body}` }) });
+          response = await this.fetchImpl(`https://api.telegram.org/bot${token}/sendMessage`, { ...requestOptions, method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chat_id: chatId, text: `ContextHub notification: ${body}` }) });
         } else throw new Error('notification provider is not configured');
         if (!response.ok) throw new Error(`http_${response.status}`);
-        this.db.prepare("UPDATE change_deliveries SET status = 'delivered', delivered_at = ? WHERE id = ?").run(now.toISOString(), delivery.id); this.db.prepare('UPDATE change_subscriptions SET pending_count = CASE WHEN pending_count > 0 THEN pending_count - 1 ELSE 0 END, updated_at = ? WHERE id = ?').run(now.toISOString(), delivery.subscription_id); delivered += 1;
+        const completedAt = new Date().toISOString();
+        this.db.transaction(() => {
+          this.db.prepare("UPDATE change_deliveries SET status = 'delivered', delivered_at = ? WHERE id = ?").run(completedAt, delivery.id);
+          this.db.prepare('UPDATE change_subscriptions SET pending_count = CASE WHEN pending_count > 0 THEN pending_count - 1 ELSE 0 END, updated_at = ? WHERE id = ?').run(completedAt, delivery.subscription_id);
+        })();
+        delivered += 1;
       } catch (err) { recordDeliveryFailure(this.db, delivery.id, (err as Error).message, now); failed += 1; }
     }
     return { delivered, failed };

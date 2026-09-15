@@ -199,6 +199,15 @@ describe('items-repo', () => {
     });
     expect(entity.items[0]?.id).toBe(target.id);
     expect(entity.items[0]?.retrieval_sources).toContain('entity');
+
+    const inferredEntity = env.itemsRepo.search(ADMIN_ACCESS, {
+      queries: ['Orion'],
+      limit: 10,
+      surface: 'accepted',
+      mode: 'hybrid',
+    });
+    expect(inferredEntity.items[0]?.id).toBe(target.id);
+    expect(inferredEntity.items[0]?.retrieval_sources).toContain('entity');
   });
 
   it('applies ACL and validity filters inside vector/entity candidate SQL', () => {
@@ -370,6 +379,7 @@ describe('items-repo', () => {
     insert('a', makeItem({ title: 'plain english note' }));
     env.db.exec('DELETE FROM items_fts'); // simulate a stale/invalid index after restore
     env.db.exec('DELETE FROM item_embeddings');
+    env.db.exec('DELETE FROM item_entity_term_index');
     expect(env.itemsRepo.retrievalProjectionStatus().ready).toBe(false);
     const { indexed, vectorIndexed } = env.itemsRepo.reindex();
     expect(indexed).toBe(2);
