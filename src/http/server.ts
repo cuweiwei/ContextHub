@@ -16,6 +16,7 @@ import { registerSourceRoutes } from './routes/sources.js';
 import { registerStateRoutes } from './routes/state.js';
 import { registerContextRoutes } from './routes/context.js';
 import { registerChangeRoutes } from './routes/changes.js';
+import { registerRadarRoutes } from './routes/radar.js';
 import { registerConnectorRoutes } from './routes/connectors.js';
 import { registerEntityRoutes } from './routes/entities.js';
 import { registerMigrationRoutes } from './routes/migrations.js';
@@ -81,6 +82,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   registerStateRoutes(app, deps);
   registerContextRoutes(app, deps);
   registerChangeRoutes(app, deps);
+  registerRadarRoutes(app, deps);
   registerConnectorRoutes(app, deps);
   registerEntityRoutes(app, deps);
   registerMigrationRoutes(app, deps);

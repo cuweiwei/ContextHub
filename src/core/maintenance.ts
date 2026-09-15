@@ -11,6 +11,7 @@ import { buildInfo } from '../build-info.js';
 import { createAuditRepo } from './audit-repo.js';
 import { verifyAuditChain } from './audit-chain.js';
 import { verifyAuditAnchor } from './audit-chain-admin.js';
+import { isMigrationSetCurrent, MIGRATION_VERSIONS } from '../db/migrations.js';
 
 export const MIN_FREE_BYTES = 1_073_741_824;
 export const BACKUP_MAX_AGE_MS = 26 * 60 * 60 * 1000;
@@ -300,9 +301,8 @@ export function runDoctor(db: DB, dataDir: string): DoctorReport {
   try {
     const rows = db.prepare('SELECT version FROM schema_migrations ORDER BY version').all() as Array<{ version: number }>;
     const versions = rows.map((row) => row.version);
-    const expected = Array.from({ length: buildInfo.schema_version }, (_, index) => index + 1);
-    const current = JSON.stringify(versions) === JSON.stringify(expected);
-    checks.migrations = { status: current ? 'pass' : 'fail', message: current ? 'all migrations are applied' : 'migration set is pending, missing, or unknown', remediation: 'run the release upgrade gate before restarting the service', details: { applied: versions.length, expected: buildInfo.schema_version } };
+    const current = isMigrationSetCurrent(db);
+    checks.migrations = { status: current ? 'pass' : 'fail', message: current ? 'all migrations are applied' : 'migration set is pending, missing, or unknown', remediation: 'run the release upgrade gate before restarting the service', details: { applied: versions.length, expected: MIGRATION_VERSIONS.length } };
   } catch (err) {
     checks.migrations = { status: 'fail', message: `migration check failed: ${(err as Error).message}`, remediation: 'inspect schema_migrations on a stopped database' };
   }

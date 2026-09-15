@@ -248,6 +248,7 @@ interface ItemRow {
   decay_policy: DecayPolicy | null;
   source_item_id: string | null;
   source_uri: string | null;
+  source_withdrawn_at: string | null;
   revision: number;
   successor_of: string | null;
   superseded_by: string | null;
@@ -294,6 +295,7 @@ function rowToItem(row: ItemRow): ContextItem {
     decay_policy: row.decay_policy,
     source_item_id: row.source_item_id,
     source_uri: row.source_uri,
+    source_withdrawn_at: row.source_withdrawn_at,
     revision: row.revision,
     derived_from: [], // populated on single-item get()
     successor_of: row.successor_of,
@@ -390,9 +392,9 @@ export function createItemsRepo(
       authority, status, trust_state, acceptance_method, accepted_by, accepted_at,
       acceptance_policy_version, acceptance_rule_id, information_class, memory_kind,
       confidence, occurred_at, created_at, updated_at, expires_at, valid_from, valid_until,
-      last_verified_at, decay_policy, source_item_id, source_uri, revision, idempotency_key,
+      last_verified_at, decay_policy, source_item_id, source_uri, source_withdrawn_at, revision, idempotency_key,
       successor_of, state_kind, state_key, schema_id, claim_key
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const contentUpdateStmt = db.prepare(`
     UPDATE context_items SET type = ?, title = ?, content = ?, data = ?, tags = ?,
@@ -490,7 +492,7 @@ export function createItemsRepo(
       if (seen.has(current)) return true;
       seen.add(current); active.add(current);
       const row = selectById.get(current) as ItemRow | undefined;
-      if (!row || row.deleted || row.trust_state !== 'accepted' || row.namespace !== access.namespace || (row.expires_at && row.expires_at <= new Date().toISOString()) || (row.sensitivity === 'private' && access.maxSensitivity !== 'private') || (access.readSources !== null && !access.readSources.includes(row.source))) { active.delete(current); return false; }
+      if (!row || row.deleted || row.source_withdrawn_at || row.trust_state !== 'accepted' || row.namespace !== access.namespace || (row.expires_at && row.expires_at <= new Date().toISOString()) || (row.sensitivity === 'private' && access.maxSensitivity !== 'private') || (access.readSources !== null && !access.readSources.includes(row.source))) { active.delete(current); return false; }
       for (const child of derivedFrom(current)) if (!walk(child, depth + 1)) { active.delete(current); return false; }
       active.delete(current); return true;
     };
@@ -609,6 +611,11 @@ export function createItemsRepo(
         'this id belongs to an operational state slot; use the state update interface',
       );
     }
+    if (existing.source_withdrawn_at) {
+      throw new SourceItemConflictError(
+        `source item "${existing.source_item_id}" was withdrawn; publish a new revision with a new source_item_id`,
+      );
+    }
 
     if (existing.type === 'transaction' || input.type === 'transaction') {
       if (input.claim_key) throw new ValidationError('claim_key is not valid for append-only transactions');
@@ -674,6 +681,11 @@ export function createItemsRepo(
     if (existing.trust_state !== 'accepted') {
       throw new SourceItemConflictError(
         `item "${existing.source_item_id}" was ${existing.trust_state} and is immutable; propose again with a new source_item_id`,
+      );
+    }
+    if (existing.type === 'insight') {
+      throw new SourceItemConflictError(
+        `accepted insight "${existing.source_item_id}" is append-only; publish a new revision or propose a successor`,
       );
     }
     if (writer.principalKind === 'agent' && !writer.isAdmin) {
@@ -778,6 +790,7 @@ export function createItemsRepo(
         claim_key: claimKey,
         source_item_id: input.source_item_id ?? null,
         source_uri: input.source_uri ?? null,
+        source_withdrawn_at: null,
         revision: 1,
         derived_from: [...new Set(input.derived_from)],
         successor_of: extras.successorOf ?? null,
@@ -799,7 +812,7 @@ export function createItemsRepo(
         item.information_class, item.memory_kind,
         item.confidence, item.occurred_at, item.created_at, item.updated_at,
         item.expires_at, item.valid_from, item.valid_until, item.last_verified_at,
-        item.decay_policy, item.source_item_id, item.source_uri, item.revision,
+        item.decay_policy, item.source_item_id, item.source_uri, item.source_withdrawn_at, item.revision,
         input.idempotency_key ?? null,
         item.successor_of, item.state_kind, item.state_key, item.schema_id, item.claim_key,
       );
@@ -870,7 +883,7 @@ export function createItemsRepo(
         }
       }
     }
-    if (row.type === 'insight' && row.trust_state === 'accepted' && !access.isAdmin && !evidenceClosureReadable(row.id, access)) return null;
+    if (row.type === 'insight' && row.trust_state === 'accepted' && !row.source_withdrawn_at && !access.isAdmin && !evidenceClosureReadable(row.id, access)) return null;
     const item = rowToItem(row);
     if (item.type === 'insight') item.derived_from = derivedFrom(item.id);
     return item;
@@ -1037,6 +1050,42 @@ export function createItemsRepo(
   }
 
   /**
+   * Source-owned invalidation used by Radar withdraw tombstones. This is not
+   * a trust decision: the row, provenance, review history, and prior content
+   * remain available to authorized exact-item/history reads while all normal
+   * retrieval surfaces suppress the withdrawn source assertion.
+   */
+  function withdrawSource(
+    id: string,
+    expectedRevision: number,
+    actor: string,
+  ): { item: ContextItem; changed: boolean } | null {
+    return db.transaction((): { item: ContextItem; changed: boolean } | null => {
+      const row = selectById.get(id) as ItemRow | undefined;
+      if (!row) return null;
+      if (row.revision !== expectedRevision) {
+        throw new RevisionConflictError(
+          `revision mismatch: expected ${expectedRevision}, current ${row.revision}`,
+        );
+      }
+      if (row.source_withdrawn_at) return { item: rowToItem(row), changed: false };
+      const now = new Date().toISOString();
+      const result = db.prepare(
+        `UPDATE context_items
+         SET source_withdrawn_at = ?, revision = revision + 1, updated_at = ?
+         WHERE id = ? AND revision = ? AND source_withdrawn_at IS NULL`,
+      ).run(now, now, id, expectedRevision);
+      if (result.changes === 0) {
+        throw new RevisionConflictError('the item changed concurrently; source withdrawal aborted');
+      }
+      const fresh = rowToItem(selectById.get(id) as ItemRow);
+      reindexItem(fresh.id, fresh);
+      writeVersion(fresh, 'source_withdraw', actor);
+      return { item: fresh, changed: true };
+    })();
+  }
+
+  /**
    * Hard removal for true deletion requests (admin only, via commands).
    * Removes the item, its versions, reviews, evidence edges, and FTS entry.
    * The caller writes an audit metadata row; backups age out on rotation.
@@ -1106,6 +1155,9 @@ export function createItemsRepo(
     }
 
     where.push(`${alias}.deleted = 0`);
+    // A source withdrawal invalidates the item for every ordinary retrieval
+    // surface while retaining the row, version history, and cache pointer.
+    where.push(`${alias}.source_withdrawn_at IS NULL`);
     const validity = filters?.validity ?? 'current';
     if (!includeExpired && validity !== 'all') {
       if (validity === 'scheduled') {
@@ -1125,6 +1177,10 @@ export function createItemsRepo(
     }
     // Operational state slots have their own read surface (state rules).
     where.push(`(${alias}.state_kind IS NULL OR ${alias}.state_kind != 'operational')`);
+    // A superseded accepted assertion is retained for provenance/history but
+    // must not remain eligible for the default shared recall surface. An
+    // explicit status filter can still request it for audit/workbench views.
+    if (!filters?.statuses?.length) where.push(`${alias}.status != 'superseded'`);
 
     // Trust surface — candidates are excluded in SQL, before FTS ranking,
     // counting, or snippeting. rejected/revoked never appear in any list.
@@ -1507,6 +1563,7 @@ export function createItemsRepo(
          WHERE i.deleted = 0
            AND (? IS NULL OR i.namespace = ?)
            AND i.trust_state = 'accepted'
+           AND i.source_withdrawn_at IS NULL
            AND (i.state_kind IS NULL OR i.state_kind != 'operational')
            AND (i.expires_at IS NULL OR i.expires_at > strftime('%Y-%m-%dT%H:%M:%fZ','now'))
            AND (i.valid_from IS NULL OR i.valid_from <= strftime('%Y-%m-%dT%H:%M:%fZ','now'))
@@ -1955,6 +2012,7 @@ export function createItemsRepo(
           claim_key: null,
           source_item_id: null,
           source_uri: null,
+          source_withdrawn_at: null,
           revision: 1,
           derived_from: [],
           successor_of: null,
@@ -1975,7 +2033,7 @@ export function createItemsRepo(
           item.information_class, item.memory_kind,
           null, null, item.created_at, item.updated_at,
           item.expires_at, null, null, item.last_verified_at, null,
-          null, null, 1, null,
+          null, null, null, 1, null,
           null, item.state_kind, item.state_key, item.schema_id, null,
         );
         writeVersion(item, 'create', writer.clientId);
@@ -2078,6 +2136,7 @@ export function createItemsRepo(
     get,
     update,
     review,
+    withdrawSource,
     softDelete,
     purge,
     history,

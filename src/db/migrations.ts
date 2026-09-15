@@ -792,9 +792,75 @@ const MIGRATIONS: {
         WHERE claim_key IS NOT NULL AND deleted = 0;
     `,
   },
+  {
+    version: 17,
+    name: 'radar-publication-ledger-and-source-withdrawal',
+    sql: `
+      ALTER TABLE context_items ADD COLUMN source_withdrawn_at TEXT;
+      CREATE INDEX idx_items_source_withdrawn
+        ON context_items(namespace, source, source_withdrawn_at)
+        WHERE source_withdrawn_at IS NOT NULL AND deleted = 0;
+
+      -- Radar's durable publication receipt stores only bounded metadata and
+      -- hashes. The insight body remains canonical Hub data in context_items.
+      CREATE TABLE radar_publications (
+        id TEXT PRIMARY KEY,
+        namespace TEXT NOT NULL REFERENCES namespaces(id),
+        publisher_id TEXT NOT NULL REFERENCES clients(id),
+        insight_id TEXT NOT NULL,
+        insight_revision INTEGER NOT NULL CHECK (insight_revision > 0),
+        action TEXT NOT NULL CHECK (action IN ('publish', 'withdraw')),
+        operation_key TEXT NOT NULL,
+        payload_hash TEXT NOT NULL,
+        hub_content_hash TEXT,
+        hub_item_id TEXT REFERENCES context_items(id),
+        hub_item_revision INTEGER,
+        status TEXT NOT NULL CHECK (status IN ('candidate', 'accepted', 'rejected', 'withdrawn', 'failed', 'stale')),
+        hub_withdrawal_status TEXT NOT NULL DEFAULT 'not_requested'
+          CHECK (hub_withdrawal_status IN ('not_requested', 'applied', 'stale', 'not_found')),
+        error_code TEXT,
+        error_message TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(publisher_id, operation_key),
+        UNIQUE(publisher_id, insight_id, insight_revision, action)
+      );
+      CREATE INDEX idx_radar_publications_lookup
+        ON radar_publications(namespace, publisher_id, insight_id, insight_revision DESC);
+
+      -- One monotonic head per server-bound Radar publisher and stable insight
+      -- identity. A withdrawn head is retained so late older publications can
+      -- never resurrect it.
+      CREATE TABLE radar_insight_heads (
+        namespace TEXT NOT NULL REFERENCES namespaces(id),
+        publisher_id TEXT NOT NULL REFERENCES clients(id),
+        insight_id TEXT NOT NULL,
+        current_revision INTEGER NOT NULL CHECK (current_revision > 0),
+        state TEXT NOT NULL CHECK (state IN ('active', 'withdrawn')),
+        hub_item_id TEXT REFERENCES context_items(id),
+        hub_item_revision INTEGER,
+        head_publication_id TEXT,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(namespace, publisher_id, insight_id)
+      );
+      CREATE INDEX idx_radar_heads_item ON radar_insight_heads(hub_item_id);
+    `,
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
+export const MIGRATION_VERSIONS = MIGRATIONS.map((migration) => migration.version);
+
+/**
+ * Migration versions are an explicit set rather than an implied 1..N range.
+ * This permits a release branch to carry an additive migration after an
+ * optional projection migration without declaring an un-applied schema.
+ */
+export function isMigrationSetCurrent(db: Database.Database): boolean {
+  const applied = db.prepare('SELECT version FROM schema_migrations ORDER BY version').all()
+    .map((row: any) => row.version as number);
+  return JSON.stringify(applied) === JSON.stringify(MIGRATION_VERSIONS);
+}
 
 export function migrate(db: Database.Database): void {
   db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (

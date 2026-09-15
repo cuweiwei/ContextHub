@@ -3,7 +3,7 @@ import type { DB } from '../db/connection.js';
 
 /** Rebuilds reviewer-only suggestions. It never changes an accepted row. */
 export function rebuildConsolidationQueue(db: DB): { created: number } {
-  const rows = db.prepare("SELECT id, namespace, type, title, expires_at, last_verified_at, decay_policy FROM context_items WHERE deleted = 0 AND trust_state = 'accepted' AND state_kind IS NULL").all() as Array<{ id: string; namespace: string; type: string; title: string; expires_at: string | null; last_verified_at: string | null; decay_policy: string | null }>;
+  const rows = db.prepare("SELECT id, namespace, type, title, expires_at, last_verified_at, decay_policy FROM context_items WHERE deleted = 0 AND source_withdrawn_at IS NULL AND trust_state = 'accepted' AND status != 'superseded' AND state_kind IS NULL").all() as Array<{ id: string; namespace: string; type: string; title: string; expires_at: string | null; last_verified_at: string | null; decay_policy: string | null }>;
   const groups = new Map<string, string[]>();
   for (const row of rows) { const key = `${row.namespace}|${row.type}|${row.title.normalize('NFKC').trim().toLocaleLowerCase()}`; groups.set(key, [...(groups.get(key) ?? []), row.id]); }
   const insert = db.prepare('INSERT OR IGNORE INTO reviewer_suggestions (id, namespace, kind, item_ids, reason, status, created_at) VALUES (?, ?, ?, ?, ?, \'open\', ?)');
@@ -15,7 +15,7 @@ export function rebuildConsolidationQueue(db: DB): { created: number } {
   for (const row of rows) {
     if ((row.expires_at && row.expires_at <= now) || (row.last_verified_at && row.decay_policy === 'rapid' && Date.parse(row.last_verified_at) < Date.now() - 14 * 86_400_000)) { if (add(row.namespace, 'reverify', [row.id], 'validity or freshness decay threshold reached')) created += 1; }
   }
-  const broken = db.prepare("SELECT ie.insight_id, i.namespace FROM insight_evidence ie JOIN context_items i ON i.id = ie.insight_id JOIN context_items ev ON ev.id = ie.evidence_id WHERE i.trust_state = 'accepted' AND ev.trust_state IN ('revoked', 'rejected')").all() as Array<{ insight_id: string; namespace: string }>;
+  const broken = db.prepare("SELECT ie.insight_id, i.namespace FROM insight_evidence ie JOIN context_items i ON i.id = ie.insight_id JOIN context_items ev ON ev.id = ie.evidence_id WHERE i.source_withdrawn_at IS NULL AND i.status != 'superseded' AND i.trust_state = 'accepted' AND (ev.source_withdrawn_at IS NOT NULL OR ev.trust_state IN ('revoked', 'rejected'))").all() as Array<{ insight_id: string; namespace: string }>;
   for (const row of broken) if (add(row.namespace, 'reverify', [row.insight_id], 'upstream evidence was revoked or rejected')) created += 1;
   return { created };
 }

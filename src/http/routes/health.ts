@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import type { FastifyInstance } from 'fastify';
 import type { AppDeps } from '../server.js';
 import { buildInfo } from '../../build-info.js';
+import { isMigrationSetCurrent } from '../../db/migrations.js';
 
 const MIN_FREE_BYTES = 1_073_741_824;
 const RELEASE_COMMIT_RE = /^[0-9a-f]{40}$/i;
@@ -38,7 +39,7 @@ export function registerHealthRoutes(app: FastifyInstance, deps: AppDeps): void 
     const schemaRow = deps.db
       .prepare('SELECT MAX(version) AS version, COUNT(*) AS count FROM schema_migrations')
       .get() as { version: number | null; count: number };
-    const migrationsCurrent = schemaRow.version === buildInfo.schema_version && schemaRow.count === buildInfo.schema_version;
+    const migrationsCurrent = schemaRow.version === buildInfo.schema_version && isMigrationSetCurrent(deps.db);
     const retrievalProjection = deps.itemsRepo.retrievalProjectionStatus();
     const degraded = !auditWritable || !migrationsCurrent || !retrievalProjection.ready || diskStatus !== 'ok';
     return reply.header('Cache-Control', 'no-store').code(degraded ? 503 : 200).send({
@@ -63,7 +64,7 @@ export function registerHealthRoutes(app: FastifyInstance, deps: AppDeps): void 
     const schemaRow = deps.db
       .prepare('SELECT MAX(version) AS version, COUNT(*) AS count FROM schema_migrations')
       .get() as { version: number | null; count: number };
-    const migrationsCurrent = schemaRow.version === buildInfo.schema_version && schemaRow.count === buildInfo.schema_version;
+    const migrationsCurrent = schemaRow.version === buildInfo.schema_version && isMigrationSetCurrent(deps.db);
 
     return reply.header('Cache-Control', 'no-store').send({
       service: 'contexthub',

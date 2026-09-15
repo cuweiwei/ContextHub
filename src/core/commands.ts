@@ -53,7 +53,17 @@ import {
   type PatchItem,
   type ReadAccess,
   type TrustSurface,
+  newItemSchema,
 } from './types.js';
+import {
+  MAX_RADAR_ITEM_JSON_BYTES,
+  RADAR_PUBLICATION_PROTOCOL,
+  radarHubContentHash,
+  radarSourceItemId,
+  normalizeRadarHash,
+  stableRadarJson,
+  type RadarInsightItem,
+} from './radar-publications.js';
 
 /**
  * The domain-command layer. EVERY mutation — REST or MCP — flows through
@@ -243,7 +253,14 @@ export function createCommands(deps: CommandDeps) {
     operation: string,
     idempotencyKey: string,
     payload: unknown,
-    opts: { targetNamespace?: string | null; itemId?: (result: T) => string | null; persistResult?: (result: T) => unknown; emitChangeEvent?: boolean },
+    opts: {
+      targetNamespace?: string | null;
+      itemId?: (result: T) => string | null;
+      revision?: (result: T) => number | null;
+      entityKind?: (result: T) => 'context_item' | 'domain';
+      persistResult?: (result: T) => unknown;
+      emitChangeEvent?: boolean;
+    },
     fn: (ctx: AuthzContext) => T,
   ): { result: T; replayed: boolean } {
     if (!idempotencyKey || typeof idempotencyKey !== 'string') {
@@ -281,12 +298,13 @@ export function createCommands(deps: CommandDeps) {
         const result = fn(ctx);
         const entityId = opts.itemId?.(result) ?? (typeof result === 'object' && result !== null && 'id' in result ? String((result as { id: unknown }).id) : idempotencyKey);
         const eventNamespace = ns === '*' && entityId ? (db.prepare('SELECT namespace FROM context_items WHERE id = ?').get(entityId) as { namespace: string } | undefined)?.namespace : ns;
-        const revision = typeof result === 'object' && result !== null && 'item' in result && (result as { item?: { revision?: number } }).item?.revision !== undefined
+        const revision = opts.revision?.(result) ?? (typeof result === 'object' && result !== null && 'item' in result && (result as { item?: { revision?: number } }).item?.revision !== undefined
           ? (result as { item: { revision: number } }).item.revision
-          : null;
+          : null);
         if (opts.emitChangeEvent !== false && eventNamespace && eventNamespace !== '*') {
           const occurredAt = new Date().toISOString();
-          changeInsert.run(eventNamespace, operation, operation.startsWith('write.') ? 'context_item' : 'domain', entityId, revision, occurredAt);
+          const entityKind = opts.entityKind?.(result) ?? (opts.itemId ? 'context_item' : 'domain');
+          changeInsert.run(eventNamespace, operation, entityKind, entityId, revision, occurredAt);
           enqueueChangeNotification(db, { namespace: eventNamespace, category: operation, severity: 'info', count: 1, timestamp: occurredAt });
         }
         idemInsert.run(ns, client.id, idempotencyKey, operation, hash, JSON.stringify(opts.persistResult ? opts.persistResult(result) : result), new Date().toISOString());
@@ -619,6 +637,9 @@ export function createCommands(deps: CommandDeps) {
       { itemId: () => itemId },
       (ctx) => {
         requireCap(ctx, 'memory.review');
+        if (!ctx.client.isAdmin && ctx.client.principalKind !== 'human') {
+          throw new PolicyDeniedError('memory review requires a human reviewer');
+        }
         const existing = itemsRepo.get(ctx.access, itemId, { allCandidates: true });
         if (!existing) throw new NotFoundError(`no item with id "${itemId}"`);
         if (existing.source === ctx.client.id && !ctx.client.isAdmin) {
@@ -631,10 +652,316 @@ export function createCommands(deps: CommandDeps) {
           note: opts.note,
         });
         if (!item) throw new NotFoundError(`no item with id "${itemId}"`);
+        if (item.type === 'insight') {
+          const status = item.trust_state === 'accepted'
+            ? 'accepted'
+            : item.trust_state === 'rejected'
+              ? 'rejected'
+              : 'withdrawn';
+          db.prepare(
+            `UPDATE radar_publications
+             SET status = ?, hub_item_revision = ?, updated_at = ?
+             WHERE hub_item_id = ? AND status IN ('candidate', 'accepted', 'rejected')`,
+          ).run(status, item.revision, new Date().toISOString(), item.id);
+        }
         return { item };
       },
     );
     return { ...result, replayed };
+  }
+
+  type RadarPublicationInput = {
+    schemaVersion: 1;
+    insightId: string;
+    revision: number;
+    operationKey: string;
+    contentHash: string;
+    hubContentHash?: string;
+    action: 'publish' | 'withdraw';
+    item?: RadarInsightItem;
+  };
+
+  type RadarPublicationRow = {
+    id: string;
+    namespace: string;
+    publisher_id: string;
+    insight_id: string;
+    insight_revision: number;
+    action: 'publish' | 'withdraw';
+    operation_key: string;
+    payload_hash: string;
+    hub_content_hash: string | null;
+    hub_item_id: string | null;
+    hub_item_revision: number | null;
+    status: 'candidate' | 'accepted' | 'rejected' | 'withdrawn' | 'failed' | 'stale';
+    hub_withdrawal_status: 'not_requested' | 'applied' | 'stale' | 'not_found';
+    error_code: string | null;
+    error_message: string | null;
+    created_at: string;
+    updated_at: string;
+  };
+
+  type RadarPublicationResult = {
+    protocol: typeof RADAR_PUBLICATION_PROTOCOL;
+    publication_id: string;
+    namespace: string;
+    publisher_id: string;
+    insight_id: string;
+    insight_revision: number;
+    action: 'publish' | 'withdraw';
+    operation_key: string;
+    content_hash: string;
+    hub_content_hash: string | null;
+    hub_item_id: string | null;
+    hub_item_revision: number | null;
+    status: RadarPublicationRow['status'];
+    hub_withdrawal_status: RadarPublicationRow['hub_withdrawal_status'];
+    error_code: string | null;
+    error_message: string | null;
+    created_at: string;
+    updated_at: string;
+    created: boolean;
+    changed: boolean;
+  };
+
+  function radarPublicationResult(
+    row: RadarPublicationRow,
+    extra: { created: boolean; changed: boolean },
+  ): RadarPublicationResult {
+    return {
+      protocol: RADAR_PUBLICATION_PROTOCOL,
+      publication_id: row.id,
+      namespace: row.namespace,
+      publisher_id: row.publisher_id,
+      insight_id: row.insight_id,
+      insight_revision: row.insight_revision,
+      action: row.action,
+      operation_key: row.operation_key,
+      content_hash: row.payload_hash,
+      hub_content_hash: row.hub_content_hash,
+      hub_item_id: row.hub_item_id,
+      hub_item_revision: row.hub_item_revision,
+      status: row.status,
+      hub_withdrawal_status: row.hub_withdrawal_status,
+      error_code: row.error_code,
+      error_message: row.error_message,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+      ...extra,
+    };
+  }
+
+  /**
+   * Service-only Radar ingress. The publication ledger and the Hub item are
+   * committed in the same idempotent command, while review remains a separate
+   * human-authority operation. Radar's source identity is the verified client;
+   * request fields cannot select a namespace, source, or authority.
+   */
+  function publishRadarInsight(client: ClientAuth, input: RadarPublicationInput): RadarPublicationResult & { replayed: boolean } {
+    const contentHash = normalizeRadarHash(input.contentHash);
+    const hubContentHash = input.hubContentHash ? normalizeRadarHash(input.hubContentHash) : undefined;
+    const requestedHubContentHash = input.action === 'publish' && input.item ? radarHubContentHash(input.item) : undefined;
+    const expectedHubContentHash = hubContentHash ?? requestedHubContentHash;
+    const payload = { ...input, contentHash, ...(hubContentHash ? { hubContentHash } : {}) };
+    const { result, replayed } = runMutation(
+      client,
+      'radar.publish',
+      input.operationKey,
+      payload,
+      {
+        itemId: (value: RadarPublicationResult) => value.changed ? value.hub_item_id : null,
+        revision: (value: RadarPublicationResult) => value.changed ? value.hub_item_revision : null,
+        entityKind: (value: RadarPublicationResult) => value.changed && value.hub_item_id ? 'context_item' : 'domain',
+      },
+      (ctx): RadarPublicationResult => {
+        requireCap(ctx, 'memory.publish_insight');
+        if (ctx.client.isAdmin || ctx.client.principalKind !== 'service') {
+          throw new PolicyDeniedError('Radar publication requires a namespace-bound service principal');
+        }
+        if (input.schemaVersion !== 1) throw new ValidationError('unsupported Radar publication schema_version');
+        if (!input.insightId.trim() || input.insightId.length > 200) throw new ValidationError('insight_id must be 1 to 200 characters');
+        if (!Number.isInteger(input.revision) || input.revision < 1) throw new ValidationError('revision must be a positive integer');
+        if (!input.operationKey.trim() || input.operationKey.length > 200) throw new ValidationError('operation_key must be 1 to 200 characters');
+        if (input.action === 'publish' && !input.item) throw new ValidationError('publish requires an item');
+        if (input.action === 'withdraw' && input.item) throw new ValidationError('withdraw must not include an item');
+
+        const existing = db.prepare(
+          `SELECT * FROM radar_publications
+           WHERE publisher_id = ? AND insight_id = ? AND insight_revision = ? AND action = ?`,
+        ).get(ctx.client.id, input.insightId, input.revision, input.action) as RadarPublicationRow | undefined;
+        if (existing) {
+          if (existing.payload_hash !== contentHash || (expectedHubContentHash && existing.hub_content_hash !== expectedHubContentHash)) {
+            throw new SourceItemConflictError('the same Radar insight revision already has a different publication payload');
+          }
+          return radarPublicationResult(existing, { created: false, changed: false });
+        }
+
+        const publicationId = ulid();
+
+        const head = db.prepare(
+          `SELECT current_revision, state, hub_item_id, hub_item_revision, head_publication_id
+           FROM radar_insight_heads WHERE namespace = ? AND publisher_id = ? AND insight_id = ?`,
+        ).get(ctx.client.namespace, ctx.client.id, input.insightId) as {
+          current_revision: number;
+          state: 'active' | 'withdrawn';
+          hub_item_id: string | null;
+          hub_item_revision: number | null;
+          head_publication_id: string | null;
+        } | undefined;
+        if (head && (input.revision < head.current_revision || (input.revision === head.current_revision && head.state === 'withdrawn'))) {
+          const staleId = ulid();
+          const now = new Date().toISOString();
+          db.prepare(
+            `INSERT INTO radar_publications
+             (id, namespace, publisher_id, insight_id, insight_revision, action, operation_key,
+              payload_hash, hub_content_hash, hub_item_id, hub_item_revision, status,
+              hub_withdrawal_status, error_code, error_message, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'stale', ?, NULL, NULL, ?, ?)`,
+          ).run(
+            staleId, ctx.client.namespace, ctx.client.id, input.insightId, input.revision,
+            input.action, input.operationKey, contentHash, hubContentHash ?? null,
+            head.hub_item_id, head.hub_item_revision,
+            input.action === 'withdraw' ? 'stale' : 'not_requested', now, now,
+          );
+          const row = db.prepare('SELECT * FROM radar_publications WHERE id = ?').get(staleId) as RadarPublicationRow;
+          return radarPublicationResult(row, { created: true, changed: false });
+        }
+
+        let hubItemId: string | null = null;
+        let hubItemRevision: number | null = null;
+        let status: RadarPublicationRow['status'] = 'candidate';
+        let hubWithdrawalStatus: RadarPublicationRow['hub_withdrawal_status'] = 'not_requested';
+        let changed = false;
+
+        if (input.action === 'publish') {
+          const parsed = newItemSchema.safeParse({
+            ...input.item,
+            type: 'insight',
+            idempotency_key: input.operationKey,
+            source_item_id: radarSourceItemId(input.insightId, input.revision),
+          });
+          if (!parsed.success) throw new ValidationError(parsed.error.message);
+          if (parsed.data.status !== 'active') throw new ValidationError('Radar publications must create active insight items');
+          if (Buffer.byteLength(stableRadarJson(parsed.data), 'utf8') > MAX_RADAR_ITEM_JSON_BYTES) {
+            throw new ValidationError('Radar publication item exceeds the bounded payload limit');
+          }
+          const computedHubHash = radarHubContentHash(parsed.data);
+          if (computedHubHash !== (hubContentHash ?? computedHubHash)) {
+            throw new ValidationError('hub_content_hash does not match the canonical Hub item payload');
+          }
+          const predecessor = head?.hub_item_id
+            ? itemsRepo.get(ctx.access, head.hub_item_id, { allCandidates: true })
+            : null;
+          const inserted = itemsRepo.insert(
+            writeContextFor(ctx, ctx.client.id, ctx.client.namespace),
+            parsed.data,
+            resolveAuthority(ctx.client),
+            trustFor(ctx, 'insight'),
+            predecessor?.trust_state === 'accepted' ? { successorOf: predecessor.id } : {},
+          );
+          hubItemId = inserted.item.id;
+          hubItemRevision = inserted.item.revision;
+          changed = inserted.created;
+          db.prepare(
+            `INSERT INTO radar_insight_heads
+             (namespace, publisher_id, insight_id, current_revision, state, hub_item_id,
+              hub_item_revision, head_publication_id, updated_at)
+             VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)
+             ON CONFLICT(namespace, publisher_id, insight_id) DO UPDATE SET
+               current_revision = excluded.current_revision, state = excluded.state,
+               hub_item_id = excluded.hub_item_id, hub_item_revision = excluded.hub_item_revision,
+               head_publication_id = excluded.head_publication_id, updated_at = excluded.updated_at
+             WHERE excluded.current_revision >= radar_insight_heads.current_revision`,
+          ).run(ctx.client.namespace, ctx.client.id, input.insightId, input.revision, hubItemId, hubItemRevision, publicationId, new Date().toISOString());
+        } else {
+          const current = head?.hub_item_id
+            ? itemsRepo.get(ctx.access, head.hub_item_id, { allCandidates: true })
+            : null;
+          hubItemId = current?.id ?? head?.hub_item_id ?? null;
+          hubItemRevision = current?.revision ?? head?.hub_item_revision ?? null;
+          if (current && current.source === ctx.client.id) {
+            if (current.source_withdrawn_at) {
+              hubWithdrawalStatus = 'applied';
+            } else {
+              const withdrawn = itemsRepo.withdrawSource(current.id, current.revision, ctx.client.id);
+              if (withdrawn) {
+                hubItemRevision = withdrawn.item.revision;
+                hubWithdrawalStatus = withdrawn.changed ? 'applied' : 'not_found';
+                changed = withdrawn.changed;
+              } else {
+                hubWithdrawalStatus = 'not_found';
+              }
+            }
+          } else {
+            hubWithdrawalStatus = 'not_found';
+          }
+          status = 'withdrawn';
+          db.prepare(
+            `INSERT INTO radar_insight_heads
+             (namespace, publisher_id, insight_id, current_revision, state, hub_item_id,
+              hub_item_revision, head_publication_id, updated_at)
+             VALUES (?, ?, ?, ?, 'withdrawn', ?, ?, ?, ?)
+             ON CONFLICT(namespace, publisher_id, insight_id) DO UPDATE SET
+               current_revision = excluded.current_revision, state = excluded.state,
+               hub_item_id = excluded.hub_item_id, hub_item_revision = excluded.hub_item_revision,
+               head_publication_id = excluded.head_publication_id, updated_at = excluded.updated_at
+             WHERE excluded.current_revision >= radar_insight_heads.current_revision`,
+          ).run(ctx.client.namespace, ctx.client.id, input.insightId, input.revision, hubItemId, hubItemRevision, publicationId, new Date().toISOString());
+        }
+
+        const now = new Date().toISOString();
+        db.prepare(
+          `INSERT INTO radar_publications
+           (id, namespace, publisher_id, insight_id, insight_revision, action, operation_key,
+            payload_hash, hub_content_hash, hub_item_id, hub_item_revision, status,
+            hub_withdrawal_status, error_code, error_message, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)`,
+        ).run(
+          publicationId, ctx.client.namespace, ctx.client.id, input.insightId, input.revision,
+          input.action, input.operationKey, contentHash, expectedHubContentHash ?? null,
+          hubItemId, hubItemRevision, status, hubWithdrawalStatus, now, now,
+        );
+        const row = db.prepare('SELECT * FROM radar_publications WHERE id = ?').get(publicationId) as RadarPublicationRow;
+        return radarPublicationResult(row, { created: true, changed });
+      },
+    );
+    return { ...result, replayed };
+  }
+
+  function listRadarPublications(
+    client: ClientAuth,
+    opts: { insightId?: string; publisherId?: string; limit?: number } = {},
+  ): { protocol: typeof RADAR_PUBLICATION_PROTOCOL; publications: RadarPublicationResult[] } {
+    return readAudited(client, 'read.radar_publications', client.isAdmin ? null : 'memory.publish_insight', {
+      insight_id: opts.insightId ?? null,
+      limit: opts.limit ?? 100,
+    }, (ctx) => {
+      if (!ctx.client.isAdmin && opts.publisherId && opts.publisherId !== ctx.client.id) {
+        throw new PolicyDeniedError('publication reconciliation is bound to the verified publisher credential');
+      }
+      const where: string[] = [];
+      const params: unknown[] = [];
+      if (!ctx.client.isAdmin) {
+        where.push('namespace = ?', 'publisher_id = ?');
+        params.push(ctx.client.namespace, ctx.client.id);
+      } else if (opts.publisherId) {
+        where.push('publisher_id = ?');
+        params.push(opts.publisherId);
+      }
+      if (opts.insightId) {
+        where.push('insight_id = ?');
+        params.push(opts.insightId);
+      }
+      const limit = Math.min(1000, Math.max(1, opts.limit ?? 100));
+      const rows = db.prepare(
+        `SELECT * FROM radar_publications ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+         ORDER BY created_at DESC, id DESC LIMIT ?`,
+      ).all(...params, limit) as RadarPublicationRow[];
+      return {
+        protocol: RADAR_PUBLICATION_PROTOCOL,
+        publications: rows.map((row) => radarPublicationResult(row, { created: false, changed: false })),
+      };
+    });
   }
 
   function reviewBatch(
@@ -1640,6 +1967,8 @@ export function createCommands(deps: CommandDeps) {
     reviseCandidate,
     proposeSuccessor,
     reviewMemory,
+    publishRadarInsight,
+    listRadarPublications,
     reviewBatch,
     operateTask,
     curateNote,

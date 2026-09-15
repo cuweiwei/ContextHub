@@ -206,6 +206,8 @@ export interface ContextItem {
   claim_key: string | null;
   source_item_id: string | null;
   source_uri: string | null;
+  /** Source-owner invalidation; does not change trust/provenance or history. */
+  source_withdrawn_at: string | null;
   revision: number;
   derived_from: string[];
   successor_of: string | null;

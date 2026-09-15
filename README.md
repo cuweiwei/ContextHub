@@ -17,7 +17,8 @@
 [docs/P1-P2-API.md](docs/P1-P2-API.md)；AI 產品自身 memory 與 ContextHub 的協作、
 cache pointer、`claim_key` 與衝突規則見
 [Agent Memory Federation Protocol v1](docs/AGENT-MEMORY-FEDERATION.md) 與
-[ADR-006](docs/ADR-006-agent-memory-federation.md)。
+[ADR-006](docs/ADR-006-agent-memory-federation.md)；Radar insight publication、人工審核、
+版本去重與撤回見 [Radar Publication Contract](docs/RADAR-PUBLICATION.md)。
 
 ```mermaid
 flowchart TB
@@ -240,7 +241,7 @@ src/
            #   history/audit/policies/clients/namespaces/changes/connectors/entities/migrations)
            #   + /explore + /review + Control Center + health
   mcp/     # MCP server(21 tools)+ Streamable HTTP 掛載(stateless,一 key 一 namespace)
-  db/      # SQLite+sqlite-vec 連線(synchronous=FULL、instance lock)+ migrations(v1–v16)
+  db/      # SQLite+sqlite-vec 連線(synchronous=FULL、instance lock)+ migrations(v1–v17)
   cli.ts   # client/policy/review/audit/OAuth/namespace portability/reindex/backup/restore/...
 scripts/   # e2e/retrieval、release manifest、upgrade gate、NAS deploy/maintenance
 test/      # 100+ tests:隔離/信任/政策/稽核 fail-closed/idempotency/一致性/還原邊界

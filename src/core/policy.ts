@@ -19,6 +19,7 @@ export const CAPABILITIES = [
   'memory.read_all_candidates',
   'memory.review',
   'memory.propose_successor',
+  'memory.publish_insight',
   'task.operate',
   'task.coordinate',
   'note.curate',
@@ -238,7 +239,7 @@ export function validateStateValue(schema: StateValueSchema, value: unknown): st
  * migration seed. Applying a profile writes a NEW policy version (grants stay
  * explicit and versioned; profiles are shorthand, not hidden defaults).
  */
-export const GRANT_PROFILES = ['agent-default', 'app-producer', 'connector-producer', 'reviewer', 'none'] as const;
+export const GRANT_PROFILES = ['agent-default', 'app-producer', 'connector-producer', 'radar-publisher', 'reviewer', 'none'] as const;
 export type GrantProfile = (typeof GRANT_PROFILES)[number];
 
 export function profileFor(
@@ -283,6 +284,16 @@ export function profileFor(
         grant: { client_id: clientId, capabilities: ['memory.read_accepted', 'state.read', 'state.write', 'connector.sync'] },
         create_rules: [
           { rule_id: `profile-connector-${clientId}`, client_id: clientId, item_type: '*', create_as: 'accepted', acceptance_method: 'policy' },
+        ],
+      };
+    case 'radar-publisher':
+      return {
+        grant: { client_id: clientId, capabilities: ['memory.read_accepted', 'memory.publish_insight'] },
+        // Publication is a dedicated service integration. The hard-coded
+        // insight rule in commands still forces every published insight to a
+        // candidate until a human reviewer accepts it.
+        create_rules: [
+          { rule_id: `profile-radar-${clientId}`, client_id: clientId, item_type: 'insight', create_as: 'candidate' },
         ],
       };
     case 'reviewer':

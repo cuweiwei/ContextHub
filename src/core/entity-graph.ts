@@ -5,7 +5,7 @@ import type { ReadAccess } from './types.js';
 export function rebuildEntityGraph(db: DB): { nodes: number; aliases: number; edges: number } {
   const run = db.transaction(() => {
     db.exec('DELETE FROM entity_graph_nodes; DELETE FROM entity_graph_aliases; DELETE FROM entity_graph_edges;');
-    const rows = db.prepare("SELECT id, namespace, type, data, entities, sensitivity, trust_state FROM context_items WHERE deleted = 0 AND trust_state = 'accepted' AND (expires_at IS NULL OR expires_at > datetime('now'))").all() as Array<{ id: string; namespace: string; type: string; data: string | null; entities: string; sensitivity: string; trust_state: string }>;
+    const rows = db.prepare("SELECT id, namespace, type, data, entities, sensitivity, trust_state FROM context_items WHERE deleted = 0 AND source_withdrawn_at IS NULL AND trust_state = 'accepted' AND status != 'superseded' AND (expires_at IS NULL OR expires_at > datetime('now'))").all() as Array<{ id: string; namespace: string; type: string; data: string | null; entities: string; sensitivity: string; trust_state: string }>;
     let nodes = 0; let aliases = 0; let edges = 0;
     for (const row of rows) {
       const data = row.data ? JSON.parse(row.data) as Record<string, unknown> : {};
