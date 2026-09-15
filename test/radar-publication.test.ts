@@ -1,11 +1,46 @@
 import { createHash, randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { createAuditRepo } from '../src/core/audit-repo.js';
+import { createClientsRepo } from '../src/core/clients-repo.js';
+import { createCommands } from '../src/core/commands.js';
 import { PolicyDeniedError, SourceItemConflictError } from '../src/core/errors.js';
+import { createItemsRepo } from '../src/core/items-repo.js';
+import { createPoliciesRepo } from '../src/core/policies-repo.js';
 import {
   radarHubContentHash,
   type RadarInsightItem,
 } from '../src/core/radar-publications.js';
-import { buildTestEnv, idem } from './helpers.js';
+import { openDatabase, type DB } from '../src/db/connection.js';
+import { ADMIN_ACCESS, ADMIN_CLIENT, buildTestEnv, idem } from './helpers.js';
+
+function fileStack(db: DB) {
+  const itemsRepo = createItemsRepo(db);
+  const clientsRepo = createClientsRepo(db);
+  const policiesRepo = createPoliciesRepo(db);
+  const auditRepo = createAuditRepo(db);
+  const commands = createCommands({ db, itemsRepo, clientsRepo, policiesRepo, auditRepo });
+  return { itemsRepo, clientsRepo, policiesRepo, auditRepo, commands };
+}
+
+function fileClient(
+  stack: ReturnType<typeof fileStack>,
+  opts: { id: string; namespace?: string; principalKind?: 'agent' | 'human' | 'service'; profile?: 'agent-default' | 'radar-publisher' | 'reviewer'; scopes?: ('read' | 'write')[] },
+) {
+  const { apiKey } = stack.commands.adminCreateClient(ADMIN_CLIENT, {
+    id: opts.id,
+    name: opts.id,
+    namespace: opts.namespace ?? 'personal',
+    principalKind: opts.principalKind ?? 'agent',
+    scopes: opts.scopes ?? ['read', 'write'],
+    profile: opts.profile ?? 'agent-default',
+  });
+  const auth = stack.clientsRepo.verifyKey(apiKey);
+  if (!auth) throw new Error('freshly created key failed to verify');
+  return { apiKey, auth };
+}
 
 function sourceHash(value: string): string {
   return createHash('sha256').update(value).digest('hex');
@@ -175,5 +210,151 @@ describe('Radar publication contract', () => {
     });
     expect(listed.statusCode).toBe(200);
     expect(listed.json().publications[0].status).toBe('candidate');
+
+    const otherRadar = env.newClient({ id: 'other-radar', principalKind: 'service', profile: 'radar-publisher' });
+    const forbiddenReconciliation = await env.app.inject({
+      method: 'GET',
+      url: '/v1/radar/publications?publisher_id=other-radar',
+      headers: { authorization: `Bearer ${radar.apiKey}` },
+    });
+    expect(forbiddenReconciliation.statusCode).toBe(403);
+    expect(forbiddenReconciliation.json().error.code).toBe('policy_denied');
+
+    const invalidWithdraw = await env.app.inject({
+      method: 'POST',
+      url: '/v1/radar/publications',
+      headers: { authorization: `Bearer ${radar.apiKey}` },
+      payload: {
+        schema_version: input.schemaVersion,
+        insight_id: input.insightId,
+        revision: 2,
+        operation_key: idem(),
+        content_hash: sourceHash('withdraw-with-item'),
+        hub_content_hash: input.hubContentHash,
+        action: 'withdraw',
+        item: input.item,
+      },
+    });
+    expect(invalidWithdraw.statusCode).toBe(400);
+
+    const unsupportedVersion = await env.app.inject({
+      method: 'POST',
+      url: '/v1/radar/publications',
+      headers: { authorization: `Bearer ${radar.apiKey}` },
+      payload: {
+        schema_version: 2,
+        insight_id: 'unsupported-version',
+        revision: 1,
+        operation_key: idem(),
+        content_hash: sourceHash('unsupported-version'),
+        action: 'withdraw',
+      },
+    });
+    expect(unsupportedVersion.statusCode).toBe(400);
+
+    const revisionConflict = await env.app.inject({
+      method: 'POST',
+      url: '/v1/radar/publications',
+      headers: { authorization: `Bearer ${radar.apiKey}` },
+      payload: {
+        schema_version: input.schemaVersion,
+        insight_id: input.insightId,
+        revision: input.revision,
+        operation_key: idem(),
+        content_hash: input.contentHash,
+        hub_content_hash: radarHubContentHash(insight(1, 'different payload')),
+        action: input.action,
+        item: insight(1, 'different payload'),
+      },
+    });
+    expect(revisionConflict.statusCode).toBe(409);
+    expect(revisionConflict.json().error.code).toBe('source_item_conflict');
+    expect(otherRadar.auth.namespace).toBe('personal');
+  });
+
+  it('persists the ledger, ACL boundary, withdrawal tombstones, and feed cursors across reopen', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'contexthub-radar-'));
+    const dbFile = path.join(dir, 'contexthub.db');
+    let db: DB | null = null;
+    try {
+      db = openDatabase(dbFile);
+      let stack = fileStack(db);
+      const radar = fileClient(stack, { id: 'radar-service', principalKind: 'service', profile: 'radar-publisher' });
+      const otherRadar = fileClient(stack, { id: 'other-radar', principalKind: 'service', profile: 'radar-publisher' });
+      const workRadar = fileClient(stack, { id: 'work-radar', namespace: 'work', principalKind: 'service', profile: 'radar-publisher' });
+      const reviewer = fileClient(stack, { id: 'human-reviewer', principalKind: 'human', profile: 'reviewer' });
+      const reader = fileClient(stack, { id: 'accepted-reader', scopes: ['read'] });
+      const insightId = `restart-${randomUUID()}`;
+
+      const first = stack.commands.publishRadarInsight(radar.auth, publication({ insightId, revision: 1, item: insight(1) }));
+      stack.commands.reviewMemory(reviewer.auth, first.hub_item_id!, { decision: 'accept', expectedRevision: 1 }, idem());
+      const accepted = stack.commands.listRadarPublications(radar.auth, { insightId }).publications;
+      expect(accepted[0]?.status).toBe('accepted');
+      const acceptedFeed = stack.commands.changes(radar.auth, { after: 0, limit: 100 });
+      expect(acceptedFeed.events.some((event) => event.entity_id === first.hub_item_id)).toBe(true);
+      const acceptedCursor = acceptedFeed.next_cursor;
+
+      expect(() => stack.commands.listRadarPublications(radar.auth, { publisherId: otherRadar.auth.id })).toThrow(PolicyDeniedError);
+      expect(() => stack.commands.listRadarPublications(otherRadar.auth, { publisherId: radar.auth.id })).toThrow(PolicyDeniedError);
+      expect(stack.commands.listRadarPublications(workRadar.auth, { insightId }).publications).toHaveLength(0);
+
+      db.close();
+      db = null;
+      db = openDatabase(dbFile);
+      stack = fileStack(db);
+      const radarAfterRestart = { ...radar, auth: stack.clientsRepo.verifyKey(radar.apiKey)! };
+      const readerAfterRestart = { ...reader, auth: stack.clientsRepo.verifyKey(reader.apiKey)! };
+
+      expect(stack.commands.listRadarPublications(radarAfterRestart.auth, { insightId }).publications[0]?.status).toBe('accepted');
+      expect(stack.commands.changes(radarAfterRestart.auth, { after: acceptedCursor, limit: 100 }).events).toHaveLength(0);
+
+      const withdrawn = stack.commands.publishRadarInsight(radarAfterRestart.auth, publication({ insightId, revision: 2, action: 'withdraw' }));
+      expect(withdrawn.status).toBe('withdrawn');
+      expect(withdrawn.hub_withdrawal_status).toBe('applied');
+      expect(stack.itemsRepo.get(ADMIN_ACCESS, first.hub_item_id!)?.source_withdrawn_at).toBeTruthy();
+      expect(stack.commands.search(readerAfterRestart.auth, { queries: ['Radar insight'], limit: 10 }).items).toHaveLength(0);
+
+      const withdrawalFeed = stack.commands.changes(radarAfterRestart.auth, { after: acceptedCursor, limit: 100 });
+      expect(withdrawalFeed.events.find((event) => event.entity_id === first.hub_item_id)?.cache_pointer).toMatchObject({
+        hub_item_id: first.hub_item_id,
+        revision: withdrawn.hub_item_revision,
+      });
+      const withdrawalCursor = withdrawalFeed.next_cursor;
+
+      const tombstonedInsightId = `tombstone-${randomUUID()}`;
+      const tombstone = stack.commands.publishRadarInsight(radarAfterRestart.auth, publication({
+        insightId: tombstonedInsightId,
+        revision: 2,
+        action: 'withdraw',
+      }));
+      expect(tombstone.status).toBe('withdrawn');
+      expect(tombstone.hub_withdrawal_status).toBe('not_found');
+
+      db.close();
+      db = null;
+      db = openDatabase(dbFile);
+      stack = fileStack(db);
+      const radarAfterSecondRestart = { ...radar, auth: stack.clientsRepo.verifyKey(radar.apiKey)! };
+      const readerAfterSecondRestart = { ...reader, auth: stack.clientsRepo.verifyKey(reader.apiKey)! };
+
+      expect(stack.commands.listRadarPublications(radarAfterSecondRestart.auth, { insightId }).publications.some((item) => item.status === 'withdrawn')).toBe(true);
+      expect(stack.commands.changes(radarAfterSecondRestart.auth, { after: withdrawalCursor, limit: 100 }).events).toHaveLength(0);
+      expect(stack.commands.search(readerAfterSecondRestart.auth, { queries: ['Radar insight'], limit: 10 }).items).toHaveLength(0);
+
+      const late = stack.commands.publishRadarInsight(radarAfterSecondRestart.auth, publication({
+        insightId: tombstonedInsightId,
+        revision: 1,
+        item: insight(1),
+      }));
+      expect(late.status).toBe('stale');
+      expect(late.hub_item_id).toBeNull();
+      expect(stack.commands.search(readerAfterSecondRestart.auth, { queries: ['Radar insight'], limit: 10 }).items).toHaveLength(0);
+
+      const persistedFeed = stack.commands.changes(radarAfterSecondRestart.auth, { after: 0, limit: 100 });
+      expect(persistedFeed.events.some((event) => event.entity_id === first.hub_item_id && event.cache_pointer?.revision === withdrawn.hub_item_revision)).toBe(true);
+    } finally {
+      db?.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
