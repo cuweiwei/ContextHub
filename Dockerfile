@@ -30,7 +30,10 @@ ARG CONTEXTHUB_VERSION=unknown
 # The production process only needs the Node.js runtime. Removing npm and npx
 # keeps their package-manager dependency tree (and its CVEs) out of the final
 # image; dependency installation happens in the build stages above.
-RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends --only-upgrade libpcre2-8-0 \
+  && rm -rf /var/lib/apt/lists/* \
+  && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 ENV NODE_ENV=production \
     PORT=8787 \
     HOST=0.0.0.0 \
