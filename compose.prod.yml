@@ -1,6 +1,6 @@
 services:
   contexthub:
-    image: ghcr.io/cuweiwei/contexthub@sha256:385cc3c0242625ea1fc2f8a565718295a3685644c89e92a9e3a75f55c888ebc2
+    image: ghcr.io/cuweiwei/contexthub@sha256:c9dd8076e937f42e62e6f175f33f93ebdd5efe0616ce57fd44b25855c083e194
     container_name: contexthub
     restart: unless-stopped
     ports:
