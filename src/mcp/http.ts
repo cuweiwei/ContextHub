@@ -35,7 +35,14 @@ export function registerMcpRoutes(app: FastifyInstance, deps: AppDeps): void {
     if (namespace && client.namespace !== namespace) {
       return reply.code(403).send({ jsonrpc: '2.0', error: { code: -32003, message: 'Credential is bound to a different namespace' }, id: null });
     }
-    deps.clientActivityRepo.mcpInitialize(client.id);
+    // The MCP transport is stateless, so Hermes sends an initialize request
+    // followed by a tools/call request. Record the lifecycle event only for
+    // the actual initialize message; writing the same activity row again for
+    // every tools/call adds synchronous SQLite I/O to every memory read.
+    const method = req.body && typeof req.body === 'object' && !Array.isArray(req.body)
+      ? (req.body as { method?: unknown }).method
+      : undefined;
+    if (method === 'initialize') deps.clientActivityRepo.mcpInitialize(client.id);
 
     const server = buildMcpServer(deps, client);
     const transport = new StreamableHTTPServerTransport({

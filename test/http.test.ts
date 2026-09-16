@@ -252,6 +252,30 @@ describe('REST API', () => {
     expect(audit.details).not.toContain('規劃專案發布與回滾');
   });
 
+  it('records MCP activity on initialize without adding a write to tools/call', async () => {
+    const key = await createClient('mcp-timing-agent', 'agent', ['read']);
+    const auth = { authorization: `Bearer ${key}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json' };
+    const initialize = await app.inject({
+      method: 'POST',
+      url: '/mcp',
+      headers: auth,
+      payload: { jsonrpc: '2.0', id: 'init', method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'test', version: '1' } } },
+    });
+    expect(initialize.statusCode).toBe(200);
+    const afterInitialize = env.db.prepare('SELECT last_mcp_initialize_at, updated_at FROM client_activity WHERE client_id = ?').get('mcp-timing-agent') as { last_mcp_initialize_at: string; updated_at: string };
+    expect(afterInitialize.last_mcp_initialize_at).toBeTruthy();
+
+    const tool = await app.inject({
+      method: 'POST',
+      url: '/mcp',
+      headers: auth,
+      payload: { jsonrpc: '2.0', id: 'tool', method: 'tools/call', params: { name: 'search_context', arguments: { query: 'nothing' } } },
+    });
+    expect(tool.statusCode).toBe(200);
+    const afterTool = env.db.prepare('SELECT last_mcp_initialize_at, updated_at FROM client_activity WHERE client_id = ?').get('mcp-timing-agent') as { last_mcp_initialize_at: string; updated_at: string };
+    expect(afterTool).toEqual(afterInitialize);
+  });
+
   it('supports semantic facet filters and read-only curation suggestions over REST', async () => {
     const key = await createClient('memory-app', 'service', ['read', 'write']);
     const auth = { authorization: `Bearer ${key}` };

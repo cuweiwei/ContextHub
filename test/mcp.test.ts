@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { newItemSchema } from '../src/core/types.js';
@@ -185,6 +185,21 @@ describe('MCP endpoint', () => {
     expect(row.outcome).toBe('helpful');
     expect(row.action_changed).toBe(1);
     expect(JSON.parse(row.item_ids)).toEqual([budgetItemId, memory.id]);
+    await client.close();
+  });
+
+  it('keeps generated CJK lexical expansion from multiplying vector scans', async () => {
+    const client = await connect(agentKey);
+    const search = vi.spyOn(env.itemsRepo, 'search');
+    await client.callTool({
+      name: 'compile_context',
+      arguments: { intent: '你知道我開什麼車嗎?', target_agent: 'hermes', token_budget: 800 },
+    });
+    expect(search).toHaveBeenCalledTimes(1);
+    const options = search.mock.calls[0]![1];
+    expect(options.queries.length).toBeGreaterThan(1);
+    expect(options.vectorQueries).toEqual(['你知道我開什麼車嗎?']);
+    search.mockRestore();
     await client.close();
   });
 
