@@ -1,0 +1,58 @@
+{
+  "format": "contexthub-performance/v1",
+  "measured_at": "2026-09-16T19:33:00+08:00",
+  "layer": "L2",
+  "workload": {
+    "intent_classes": 5,
+    "samples_per_transport": 30,
+    "rounds": 6,
+    "pacing_ms": 250,
+    "concurrency": 1,
+    "result_validation": "package_id_present"
+  },
+  "releases": {
+    "contexthub_commit": "a6aa9c06f89529376244f4df3a401722a7c00fea",
+    "contexthub_image": "ghcr.io/cuweiwei/contexthub@sha256:c9dd8076e937f42e62e6f175f33f93ebdd5efe0616ce57fd44b25855c083e194",
+    "hermes_commit": "275e68fcfef7cc1cdddef4a77070f7fd5a77b800",
+    "hermes_image": "ghcr.io/cuweiwei/hermes-agent@sha256:542c59e1333ec62a772a6a5913e4273c6077b6998e9442c5db458720f0ac4f61"
+  },
+  "configuration": {
+    "sqlite_synchronous": "FULL",
+    "sqlite_cache_kib": 8192,
+    "query_profiles_enabled": true,
+    "hermes_httpx_pool": {
+      "max_connections": 4,
+      "max_keepalive_connections": 2,
+      "keepalive_expiry_seconds": 30
+    }
+  },
+  "results_ms": {
+    "rest": {
+      "successes": 30,
+      "mean": 57.842,
+      "median": 41.966,
+      "p95": 88.561,
+      "max": 346.29,
+      "first_round_mean": 101.444,
+      "after_warmup_mean": 49.121,
+      "request_mean": 38.517
+    },
+    "mcp": {
+      "successes": 30,
+      "mean": 78.51,
+      "median": 59.837,
+      "p95": 188.201,
+      "max": 250.402,
+      "first_round_mean": 110.207,
+      "after_warmup_mean": 72.17,
+      "initialize_mean": 30.752,
+      "tools_call_mean": 29.311
+    }
+  },
+  "notes": [
+    "Measured from the Hermes container through the real ContextHub network path; no LLM or Telegram time included.",
+    "Both transports used the same five intent classes, token budget 4000, and accepted-only read surface.",
+    "The benchmark did not clear OS page cache and is not a cold-disk measurement.",
+    "No raw query text, memory content, credential, or response package was persisted."
+  ]
+}

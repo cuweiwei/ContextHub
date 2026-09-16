@@ -1,7 +1,7 @@
 # ContextHub 效能改善詳細設計
 
 - 日期：2026-09-16
-- 狀態：**P1/P2 implementation candidate；提交前的本機驗證已完成，正式部署與 live benchmark 仍待本次 release。**
+- 狀態：**P1/P2 implementation deployed；本次 release 的 live benchmark 證據已保存，P3 statement/transform cache 與 P4/P5 硬體工作仍須獨立 gate。**
 - 範圍：Hermes → ContextHub 查詢路徑、連線池、精確檢索、NAS 記憶體與儲存、RAM 快取與 SQL。
 - 實作 repository：ContextHub 與 AiSecretaryChloe；兩者分別建置、測試、發布、回復。
 - 基本約束：[信任邊界](ADR-001-trust-boundary.md)、[系統設計](DESIGN.md)、[Memory Federation](AGENT-MEMORY-FEDERATION.md)。
@@ -52,9 +52,27 @@ HTTPX connection pool，ContextHub 啟用有上限的 SQLite RAM page cache，�
 - 30 次重複問題不能代表一天流量、併發或長時間 idle 後的 P95。
 - 數字取自本次工具輸出，沒有另外保存完整原始 benchmark artifact；正式實作驗收必須產生 metadata-only JSON artifact。
 
+### 2.1.1 本次 release live A/B
+
+部署後在 Hermes container 內以同一組 5 類 intent、各 6 次、串行間隔 250 ms，
+分別執行 30 次 REST 與 30 次 MCP `memory_prefetch`。兩組都 30/30 成功，token
+budget 均為 4,000；REST 沒有執行 MCP initialize。完整 metadata-only 結果見
+[PERFORMANCE-LIVE-BENCHMARK-2026-09-16.json](PERFORMANCE-LIVE-BENCHMARK-2026-09-16.json)。
+
+| transport | mean | median | P95 | max | warmup 後 mean |
+|---|---:|---:|---:|---:|---:|
+| REST（production default） | 57.842 ms | 41.966 ms | 88.561 ms | 346.290 ms | 49.121 ms |
+| MCP（對照） | 78.510 ms | 59.837 ms | 188.201 ms | 250.402 ms | 72.170 ms |
+
+相同條件下 REST 平均低約 26.3%，P95 低約 52.9%。這是 Hermes provider
+完整呼叫時間，包含 token file 讀取、HTTP、ContextHub 授權／audit／檢索與 JSON
+解碼，不包含聊天模型、Telegram 或瀏覽器時間。測試沒有清除 OS page cache，不能
+稱為 cold-disk 結果；它證明目前部署的 transport 差異，不單獨證明 SSD 或 RAM
+升級的因果效果。
+
 ### 2.2 原始碼與正式版本必須分開
 
-本文件盤點當下：
+設計起始時的盤點（historical）：
 
 | 對象 | revision |
 |---|---|
@@ -62,6 +80,12 @@ HTTPX connection pool，ContextHub 啟用有上限的 SQLite RAM page cache，�
 | AiSecretaryChloe 本機 HEAD | `971e6d3f8f45df438ddca83dda75f2de32c41f5c` |
 | ContextHub 正式 container OCI revision label | `e46484761cf8132faacb08dc7b508498b4c016c3` |
 | Hermes 正式 container OCI revision label | `4729f7544f039b53f7da79a62259ecfd954bb91c` |
+
+本次 release 的 live coordinates 已寫入
+[metadata-only benchmark](PERFORMANCE-LIVE-BENCHMARK-2026-09-16.json)：ContextHub
+image revision `a6aa9c06f89529376244f4df3a401722a7c00fea`，Hermes image revision
+`275e68fcfef7cc1cdddef4a77070f7fd5a77b800`。Compose pin 與 health release metadata
+均以相同已發布 digest 驗證。
 
 這些是 point-in-time 座標；本次讀取 label 不等於重新驗證來源與 image digest 的完整供應鏈。實作前重新盤點，不覆寫既有未提交文件。下述程式碼形狀以本機 HEAD 為依據；其中 urllib 行為、provider 路徑曾在正式容器直接檢查。
 
