@@ -102,7 +102,6 @@ export function buildTestEnv(overrides: Partial<Config> = {}) {
   const clientsRepo = createClientsRepo(db);
   const policiesRepo = createPoliciesRepo(db);
   const auditRepo = createAuditRepo(db);
-  const commands = createCommands({ db, itemsRepo, clientsRepo, policiesRepo, auditRepo });
   const config: Config = {
     port: 0,
     host: '127.0.0.1',
@@ -111,6 +110,12 @@ export function buildTestEnv(overrides: Partial<Config> = {}) {
     adminToken: TEST_ADMIN_TOKEN,
     logLevel: 'silent',
     sqliteSynchronous: 'NORMAL',
+    sqliteCacheKiB: 0,
+    enableQueryProfiles: false,
+    statementCacheEnabled: false,
+    queryTransformCacheEnabled: false,
+    idFirstRetrievalEnabled: false,
+    maintenanceMode: false,
     controlCenterEnabled: false,
     controlCenterTailscaleAuthEnabled: false,
     controlCenterTrustedProxy: false,
@@ -128,6 +133,7 @@ export function buildTestEnv(overrides: Partial<Config> = {}) {
     oauthJwksUri: undefined,
     ...overrides,
   };
+  const commands = createCommands({ db, itemsRepo, clientsRepo, policiesRepo, auditRepo, enableQueryProfiles: config.enableQueryProfiles });
   const webPrincipalsRepo = createWebPrincipalsRepo(db);
   const webSessionsRepo = createWebSessionsRepo(db);
   const enrollmentsRepo = createEnrollmentsRepo(db);

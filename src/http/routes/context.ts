@@ -10,6 +10,7 @@ const compileBodySchema = z.object({
   queries: z.array(z.string().min(1).max(1000)).max(5).optional(),
   target_agent: z.enum(CONTEXT_TARGETS).default('generic'),
   token_budget: z.number().int().min(256).max(32_000).default(4000),
+  retrieval_profile: z.enum(['standard', 'fact', 'exact_claim']).default('standard'),
   sources: z.array(z.string().min(1)).max(50).optional(),
   types: z.array(z.string().min(1)).max(50).optional(),
   tags: z.array(z.string().min(1)).max(50).optional(),
@@ -46,6 +47,7 @@ export function registerContextRoutes(app: FastifyInstance, deps: AppDeps): void
         queries: body.queries,
         target: body.target_agent,
         tokenBudget: body.token_budget,
+        retrievalProfile: body.retrieval_profile,
         filters: {
           sources: body.sources,
           types: body.types,

@@ -372,6 +372,7 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
         entities: z.array(z.string().min(1).max(200)).max(50).optional(),
         target_agent: z.enum(CONTEXT_TARGETS).default('generic'),
         token_budget: z.number().int().min(256).max(32_000).default(4000),
+        retrieval_profile: z.enum(['standard', 'fact', 'exact_claim']).default('standard'),
         sources: z.array(z.string()).max(50).optional(),
         types: z.array(z.string()).max(50).optional(),
         tags: z.array(z.string()).max(50).optional(),
@@ -400,6 +401,7 @@ export function buildMcpServer(deps: McpDeps, client: ClientAuth): McpServer {
         queries: args.queries,
         target: args.target_agent,
         tokenBudget: args.token_budget,
+        retrievalProfile: args.retrieval_profile,
         filters: {
           sources: args.sources,
           types: args.types,

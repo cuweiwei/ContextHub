@@ -17,13 +17,13 @@ const config = loadConfig();
 // Single-active-instance guard: a second server on the same data dir must
 // fail fast, never double-write the database. Held for the process lifetime.
 const instanceLock = acquireInstanceLock(config.dataDir);
-const db = openDatabase(config.dbFile, { synchronous: config.sqliteSynchronous });
+const db = openDatabase(config.dbFile, { synchronous: config.sqliteSynchronous, cacheKiB: config.sqliteCacheKiB });
 
 const itemsRepo = createItemsRepo(db);
 const clientsRepo = createClientsRepo(db);
 const policiesRepo = createPoliciesRepo(db);
 const auditRepo = createAuditRepo(db);
-const commands = createCommands({ db, itemsRepo, clientsRepo, policiesRepo, auditRepo, webhookAllowedHosts: config.webhookAllowedHosts, webhookSigningMasterKey: config.webhookSigningMasterKey });
+const commands = createCommands({ db, itemsRepo, clientsRepo, policiesRepo, auditRepo, webhookAllowedHosts: config.webhookAllowedHosts, webhookSigningMasterKey: config.webhookSigningMasterKey, enableQueryProfiles: config.enableQueryProfiles });
 const webPrincipalsRepo = createWebPrincipalsRepo(db);
 const webSessionsRepo = createWebSessionsRepo(db);
 const enrollmentsRepo = createEnrollmentsRepo(db);

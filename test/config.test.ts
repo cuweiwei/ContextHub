@@ -20,4 +20,22 @@ describe('configuration URL options', () => {
   it('still rejects non-URL values', () => {
     expect(() => loadConfig({ CONTROL_CENTER_CANONICAL_ORIGIN: 'not-a-url' })).toThrow();
   });
+
+  it('parses bounded SQLite cache and opt-in retrieval controls', () => {
+    const config = loadConfig({
+      DATA_DIR: '/tmp/contexthub-config-test',
+      SQLITE_CACHE_KIB: '32768',
+      CONTEXTHUB_ENABLE_QUERY_PROFILES: 'true',
+      CONTEXTHUB_STATEMENT_CACHE_ENABLED: 'true',
+      CONTEXTHUB_QUERY_TRANSFORM_CACHE_ENABLED: 'true',
+      CONTEXTHUB_ID_FIRST_RETRIEVAL_ENABLED: 'true',
+      CONTEXTHUB_MAINTENANCE_MODE: 'false',
+    });
+    expect(config.sqliteCacheKiB).toBe(32768);
+    expect(config.enableQueryProfiles).toBe(true);
+    expect(config.statementCacheEnabled).toBe(true);
+    expect(config.queryTransformCacheEnabled).toBe(true);
+    expect(config.idFirstRetrievalEnabled).toBe(true);
+    expect(config.maintenanceMode).toBe(false);
+  });
 });

@@ -166,14 +166,16 @@ docker compose exec contexthub node dist/cli.js restore-drill \
 ## Agent 端:接上 MCP
 
 ```bash
-claude mcp add --transport http contexthub-personal http://<nas-tailscale-ip>:8788/mcp \
+claude mcp add --transport http contexthub-personal http://<nas-tailscale-ip>:8788/mcp/personal \
   --header "Authorization: Bearer chk_<personal的key>"
-claude mcp add --transport http contexthub-work http://<nas-tailscale-ip>:8788/mcp \
+claude mcp add --transport http contexthub-work http://<nas-tailscale-ip>:8788/mcp/work \
   --header "Authorization: Bearer chk_<work的key>"     # 連線即 namespace 邊界
 ```
 
-Codex 的安全設定、personal/work credential 隔離與 smoke test 見
-[docs/CODEX.md](docs/CODEX.md)。
+本專案的 Hermes 整合使用 runtime adapter 的 token file 與 canonical tool mapping，
+不需另外建立直連 ContextHub 的 `mcp_servers` 設定；完整的安全 provisioning、preflight 與 Hermes 驗收見
+[docs/HERMES-MCP-ONBOARDING.md](docs/HERMES-MCP-ONBOARDING.md)。Codex 的安全設定、
+personal/work credential 隔離與 smoke test 見 [docs/CODEX.md](docs/CODEX.md)。
 
 ## Control Center（Tailscale HTTPS）
 

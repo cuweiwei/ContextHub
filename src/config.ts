@@ -23,6 +23,12 @@ const envSchema = z.object({
    * dev/bench setups that accept losing the last commits on power failure.
    */
   SQLITE_SYNCHRONOUS: z.enum(['FULL', 'NORMAL']).default('FULL'),
+  SQLITE_CACHE_KIB: z.coerce.number().int().min(0).max(65_536).default(0),
+  CONTEXTHUB_ENABLE_QUERY_PROFILES: envBoolean(false),
+  CONTEXTHUB_STATEMENT_CACHE_ENABLED: envBoolean(false),
+  CONTEXTHUB_QUERY_TRANSFORM_CACHE_ENABLED: envBoolean(false),
+  CONTEXTHUB_ID_FIRST_RETRIEVAL_ENABLED: envBoolean(false),
+  CONTEXTHUB_MAINTENANCE_MODE: envBoolean(false),
   CONTROL_CENTER_ENABLED: envBoolean(false),
   CONTROL_CENTER_TAILSCALE_AUTH_ENABLED: envBoolean(false),
   CONTROL_CENTER_TRUSTED_PROXY: envBoolean(false),
@@ -52,6 +58,12 @@ export interface Config {
   adminToken: string | undefined;
   logLevel: string;
   sqliteSynchronous: 'FULL' | 'NORMAL';
+  sqliteCacheKiB: number;
+  enableQueryProfiles: boolean;
+  statementCacheEnabled: boolean;
+  queryTransformCacheEnabled: boolean;
+  idFirstRetrievalEnabled: boolean;
+  maintenanceMode: boolean;
   controlCenterEnabled: boolean;
   controlCenterTailscaleAuthEnabled: boolean;
   controlCenterTrustedProxy: boolean;
@@ -87,6 +99,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     adminToken: parsed.ADMIN_TOKEN || undefined,
     logLevel: parsed.LOG_LEVEL,
     sqliteSynchronous: parsed.SQLITE_SYNCHRONOUS,
+    sqliteCacheKiB: parsed.SQLITE_CACHE_KIB,
+    enableQueryProfiles: parsed.CONTEXTHUB_ENABLE_QUERY_PROFILES,
+    statementCacheEnabled: parsed.CONTEXTHUB_STATEMENT_CACHE_ENABLED,
+    queryTransformCacheEnabled: parsed.CONTEXTHUB_QUERY_TRANSFORM_CACHE_ENABLED,
+    idFirstRetrievalEnabled: parsed.CONTEXTHUB_ID_FIRST_RETRIEVAL_ENABLED,
+    maintenanceMode: parsed.CONTEXTHUB_MAINTENANCE_MODE,
     controlCenterEnabled: parsed.CONTROL_CENTER_ENABLED,
     controlCenterTailscaleAuthEnabled: parsed.CONTROL_CENTER_TAILSCALE_AUTH_ENABLED,
     controlCenterTrustedProxy: parsed.CONTROL_CENTER_TRUSTED_PROXY,

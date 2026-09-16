@@ -10,11 +10,17 @@ ContextHub 是使用者擁有、跨 AI vendor 的 Context Control Plane：來源
 - `personal`：個人偏好、長期事實、人物、專案脈絡、個人待辦。
 - `work`：只允許抽取後的工作摘要、行動項目、決議與工作偏好。
 
-NAS 的 Tailscale MCP endpoint：
+NAS 的 Tailscale MCP endpoint（namespace 可寫在 path，讓 server 再次核對 credential）：
 
 ```text
-http://<NAS_TAILSCALE_IP>:8788/mcp
+http://<NAS_TAILSCALE_IP>:8788/mcp/<namespace>
 ```
+
+Hermes 個人 runtime adapter 的固定契約是
+`http://contexthub:8787/mcp/personal` 加上
+`/opt/secrets/contexthub-personal-key` token file；請參閱
+[Hermes → ContextHub onboarding](HERMES-MCP-ONBOARDING.md)。這不是要把舊式
+`mcp_servers` 設定或 token 寫進 ContextHub repository。
 
 這是 Tailscale 私網位址，不是公網 endpoint。你的執行環境必須已加入同一個
 tailnet，而且只能取得本次工作所需 namespace 的 credential。

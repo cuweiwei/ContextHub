@@ -22,6 +22,7 @@
     "cli": "tsx src/cli.ts",
     "test:browser": "node scripts/browser-smoke.mjs",
     "hygiene": "bash scripts/check-repo-hygiene.sh",
+    "hermes:preflight": "bash scripts/hermes-mcp-preflight.sh",
     "release:manifest": "tsx scripts/create-release-manifest.ts",
     "production:drift": "tsx scripts/check-production-drift.ts",
     "connector:github": "tsx src/connectors/github-worker-main.ts",

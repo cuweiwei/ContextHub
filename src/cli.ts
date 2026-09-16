@@ -204,12 +204,12 @@ function main(): void {
     process.exitCode = record.status === 'pass' ? 0 : 2;
     return;
   }
-  const db = openDatabase(config.dbFile, { synchronous: config.sqliteSynchronous });
+  const db = openDatabase(config.dbFile, { synchronous: config.sqliteSynchronous, cacheKiB: config.sqliteCacheKiB });
   const clientsRepo = createClientsRepo(db);
   const itemsRepo = createItemsRepo(db);
   const policiesRepo = createPoliciesRepo(db);
   const auditRepo = createAuditRepo(db);
-  const commands = createCommands({ db, itemsRepo, clientsRepo, policiesRepo, auditRepo, webhookAllowedHosts: config.webhookAllowedHosts, webhookSigningMasterKey: config.webhookSigningMasterKey });
+  const commands = createCommands({ db, itemsRepo, clientsRepo, policiesRepo, auditRepo, webhookAllowedHosts: config.webhookAllowedHosts, webhookSigningMasterKey: config.webhookSigningMasterKey, enableQueryProfiles: config.enableQueryProfiles });
   const webPrincipalsRepo = createWebPrincipalsRepo(db);
   /** The CLI runs on the DB host as the owner — same authority as the admin token. */
   const admin = ADMIN_CLIENT;

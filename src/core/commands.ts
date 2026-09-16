@@ -86,6 +86,8 @@ export interface CommandDeps {
   auditRepo: AuditRepo;
   webhookAllowedHosts?: string[];
   webhookSigningMasterKey?: string;
+  /** Opt-in retrieval profiles are disabled unless explicitly configured. */
+  enableQueryProfiles?: boolean;
 }
 
 export interface AuthzContext {
@@ -143,6 +145,7 @@ function contextRetrievalQueries(intent: string, related: string[] = []): string
 
 export function createCommands(deps: CommandDeps) {
   const { db, itemsRepo, clientsRepo, policiesRepo, auditRepo } = deps;
+  const enableQueryProfiles = deps.enableQueryProfiles ?? false;
 
   const idemSelect = db.prepare(
     'SELECT operation, request_hash, result_json FROM idempotency_records WHERE namespace = ? AND client_id = ? AND idempotency_key = ?',
@@ -1247,12 +1250,23 @@ export function createCommands(deps: CommandDeps) {
       queries?: string[];
       target: ContextTarget;
       tokenBudget: number;
+      retrievalProfile?: 'standard' | 'fact' | 'exact_claim';
       filters?: Parameters<ItemsRepo['search']>[1]['filters'];
       stateKeys?: string[];
       entities?: string[];
       runtimeInputs?: Array<{ kind: 'system_constraint' | 'tool_result'; value: string }>;
     },
   ) {
+    const retrievalProfile = opts.retrievalProfile ?? 'standard';
+    if (retrievalProfile !== 'standard' && !enableQueryProfiles) {
+      throw new ValidationError('retrieval profiles are disabled');
+    }
+    if (retrievalProfile === 'exact_claim') {
+      const claimKeys = opts.filters?.claim_keys ?? [];
+      if (claimKeys.length < 1 || claimKeys.length > 8) {
+        throw new ValidationError('exact_claim requires 1 to 8 claim_keys');
+      }
+    }
     const runtimeBytes = (opts.runtimeInputs ?? []).reduce((sum, input) => sum + Buffer.byteLength(input.value, 'utf8'), 0);
     if ((opts.runtimeInputs?.length ?? 0) > 20 || runtimeBytes > 50_000) throw new ValidationError('runtime_inputs must contain at most 20 entries and 50 KB total');
     const runtimeTokens = (opts.runtimeInputs ?? []).reduce((sum, input) => sum + Math.ceil(Buffer.byteLength(JSON.stringify(input), 'utf8') / 3) + 8, 0);
@@ -1265,6 +1279,7 @@ export function createCommands(deps: CommandDeps) {
         query_count: 1 + (opts.queries?.length ?? 0),
         target: opts.target,
         token_budget: opts.tokenBudget,
+        profile: retrievalProfile,
         state_key_count: opts.stateKeys?.length ?? 0,
         runtime_input_count: opts.runtimeInputs?.length ?? 0,
         runtime_input_bytes: (opts.runtimeInputs ?? []).reduce((sum, input) => sum + Buffer.byteLength(input.value, 'utf8'), 0),
@@ -1274,25 +1289,37 @@ export function createCommands(deps: CommandDeps) {
         if (ctx.client.isAdmin) {
           throw new ValidationError('context compilation requires a namespace-bound client');
         }
-        const retrievalQueries = contextRetrievalQueries(opts.intent, opts.queries);
-        const found = itemsRepo.search(ctx.access, {
-          queries: retrievalQueries,
-          // Keep lexical CJK expansion broad, but restrict vector work to the
-          // original intent and explicitly supplied related queries. This
-          // avoids one full authorized-corpus scan per generated bigram.
-          vectorQueries: [opts.intent, ...(opts.queries ?? [])],
-          filters: { ...opts.filters, statuses: ['active'] },
-          limit: 100,
-          surface: 'accepted',
-          mode: 'hybrid',
-          entities: opts.entities,
-        });
-        const scoreById = new Map(found.items.map((item) => [item.id, item.score]));
-        const sourcesById = new Map(found.items.map((item) => [item.id, item.retrieval_sources]));
-        const candidates: ContextCandidate[] = found.fullItems.map((item) => ({
+        const profileFilters = retrievalProfile === 'fact'
+          ? {
+              ...opts.filters,
+              information_classes: opts.filters?.information_classes ?? ['memory'],
+              memory_kinds: opts.filters?.memory_kinds ?? ['fact', 'preference'],
+            }
+          : opts.filters;
+        const found = retrievalProfile === 'exact_claim'
+          ? null
+          : itemsRepo.search(ctx.access, {
+              queries: contextRetrievalQueries(opts.intent, opts.queries),
+              // Keep lexical CJK expansion broad, but restrict vector work to the
+              // original intent and explicitly supplied related queries. This
+              // avoids one full authorized-corpus scan per generated bigram.
+              vectorQueries: [opts.intent, ...(opts.queries ?? [])],
+              filters: { ...profileFilters, statuses: ['active'] },
+              limit: retrievalProfile === 'fact' ? 40 : 100,
+              surface: 'accepted',
+              mode: 'hybrid',
+              entities: opts.entities,
+            });
+        const exactItems = retrievalProfile === 'exact_claim'
+          ? itemsRepo.claimPeers(ctx.access, opts.filters?.claim_keys ?? [], opts.filters)
+          : [];
+        const scoreById = new Map((found?.items ?? []).map((item) => [item.id, item.score]));
+        const sourcesById = new Map((found?.items ?? []).map((item) => [item.id, item.retrieval_sources]));
+        const baseItems = found?.fullItems ?? exactItems;
+        const candidates: ContextCandidate[] = baseItems.map((item) => ({
           item,
-          score: scoreById.get(item.id) ?? 0,
-          retrieval_sources: sourcesById.get(item.id) ?? [],
+          score: retrievalProfile === 'exact_claim' ? 1 : (scoreById.get(item.id) ?? 0),
+          retrieval_sources: retrievalProfile === 'exact_claim' ? [] : (sourcesById.get(item.id) ?? []),
         }));
         const claimScores = new Map<string, number>();
         for (const claimKey of opts.filters?.claim_keys ?? []) {
@@ -1306,7 +1333,7 @@ export function createCommands(deps: CommandDeps) {
           );
         }
         const knownIds = new Set(candidates.map((candidate) => candidate.item.id));
-        for (const peer of itemsRepo.claimPeers(ctx.access, [...claimScores.keys()], opts.filters)) {
+        for (const peer of retrievalProfile === 'exact_claim' ? [] : itemsRepo.claimPeers(ctx.access, [...claimScores.keys()], opts.filters)) {
           if (knownIds.has(peer.id)) continue;
           candidates.push({
             item: peer,
@@ -1334,7 +1361,7 @@ export function createCommands(deps: CommandDeps) {
           target: opts.target,
           tokenBudget: opts.tokenBudget,
           candidates,
-          retrieval: found.retrieval,
+          retrieval: found?.retrieval,
           runtimeInputs: opts.runtimeInputs,
         });
       },

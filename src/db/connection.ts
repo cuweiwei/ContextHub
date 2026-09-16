@@ -14,6 +14,8 @@ export interface OpenOptions {
    * power-loss-proof).
    */
   synchronous?: 'FULL' | 'NORMAL';
+  /** SQLite page cache in KiB. Zero leaves SQLite's default unchanged. */
+  cacheKiB?: number;
 }
 
 /**
@@ -31,6 +33,9 @@ export function openDatabase(file: string, opts: OpenOptions = {}): DB {
   db.pragma(`synchronous = ${opts.synchronous ?? 'FULL'}`);
   db.pragma('foreign_keys = ON');
   db.pragma('busy_timeout = 5000');
+  if (opts.cacheKiB && opts.cacheKiB > 0) {
+    db.pragma(`cache_size = -${Math.floor(opts.cacheKiB)}`);
+  }
   migrate(db);
   return db;
 }
