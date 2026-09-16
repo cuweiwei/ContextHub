@@ -1277,6 +1277,10 @@ export function createCommands(deps: CommandDeps) {
         const retrievalQueries = contextRetrievalQueries(opts.intent, opts.queries);
         const found = itemsRepo.search(ctx.access, {
           queries: retrievalQueries,
+          // Keep lexical CJK expansion broad, but restrict vector work to the
+          // original intent and explicitly supplied related queries. This
+          // avoids one full authorized-corpus scan per generated bigram.
+          vectorQueries: [opts.intent, ...(opts.queries ?? [])],
           filters: { ...opts.filters, statuses: ['active'] },
           limit: 100,
           surface: 'accepted',

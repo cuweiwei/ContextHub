@@ -131,6 +131,12 @@ export interface ListOptions {
 
 export interface SearchOptions {
   queries: string[];
+  /**
+   * Optional smaller set used for vector ranking. Context compilation expands
+   * CJK queries for lexical recall; running a vector scan for every generated
+   * bigram multiplies disk work without improving the result materially.
+   */
+  vectorQueries?: string[];
   filters?: ListFilters;
   limit: number;
   offset?: number;
@@ -1479,7 +1485,7 @@ export function createItemsRepo(
       // for typo/semantic queries with no strong structured signal.
       const strongLexical = sourceIds.lexical.size > 0;
       const explicitEntity = Boolean(opts.entities?.length || opts.filters?.entity_filters?.length);
-      for (const q of opts.queries) {
+      for (const q of opts.vectorQueries ?? opts.queries) {
         if (!q.trim()) continue;
         if (strongLexical || explicitEntity) continue;
         const queryVector = embeddingProvider.embedQuery(q);
