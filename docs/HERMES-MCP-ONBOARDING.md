@@ -12,6 +12,7 @@ Hermes 個人連線使用一把只屬於 `personal` namespace 的 ContextHub cre
 | 項目 | 值／規則 |
 | --- | --- |
 | MCP URL（Hermes container 內） | `http://contexthub:8787/mcp/personal` |
+| Docker network | Hermes 與 ContextHub containers 都加入平台管理的 `personal-ai-network`；ContextHub Compose 對該網路設定明確的 `contexthub` alias |
 | MCP URL（NAS host 唯讀檢查） | `http://127.0.0.1:8788/mcp/personal` |
 | Hermes token file | `/opt/secrets/contexthub-personal-key` |
 | token file 的 NAS 來源 | Hermes root-owned secrets directory 的唯讀 mount；目前 compose 對應 `/volume1/docker/hermes/secrets` |
@@ -41,6 +42,13 @@ namespace、scope、policy 與一次性 credential 發行；Hermes secret direct
 安裝與權限則由 NAS owner／既有 secret provisioning 流程負責。不要要求 agent 或
 使用者把 enrollment code、`chk_` key、`Authorization` header 或任何 secret 貼到
 聊天、Git、文件、shell history、URL 或 log。
+
+Container DNS 依賴兩個 app 共用 `personal-ai-network`，且 ContextHub 使用固定 alias
+`contexthub`。這是平台擁有的 external network：全新 NAS 必須先完成平台 bootstrap；Hermes
+或 ContextHub 的 app release 都不可建立、刪除或重建它。Production network 最初由舊 Compose
+project `prod` 建立並保留舊 labels，升級時要原地採用既有 network。ContextHub deployment
+health 只驗證 ContextHub service；Hermes 的 `provider_verified` 仍依本文件的 Hermes-side
+驗收單獨確認。
 
 若既有環境已啟用 Agent enrollment，可使用以下流程（本次不變更 feature flag）：
 

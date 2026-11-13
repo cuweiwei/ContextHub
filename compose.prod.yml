@@ -52,10 +52,12 @@ services:
       timeout: 5s
       retries: 3
     networks:
-      personal-ai-network: {}
+      personal-ai-network:
+        aliases:
+          - contexthub
 
 networks:
   personal-ai-network:
-    # This service creates the shared private bridge on first v2 cutover;
-    # PersonalAiControlPlane and Hermes join the same explicitly named bridge.
+    # Platform-owned shared bridge. App releases must preserve its lifecycle.
+    external: true
     name: personal-ai-network

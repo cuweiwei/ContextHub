@@ -17,8 +17,24 @@
 - ContextHub 的主要 Docker host port `8788` 必須維持 `127.0.0.1`，Tailscale Serve 才是遠端入口；
   `18788` 僅可綁 Docker host bridge，供 Personal AI safe-method projection 使用，不得綁 LAN/public
   interface。
+- `personal-ai-network` 是平台管理的 Docker bridge，ContextHub production Compose 只以
+  `external: true` 加入它，並在該網路宣告 `contexthub` alias。ContextHub release 不擁有此網路的
+  create/delete lifecycle，也不以 Hermes 或 Personal AI 的 health 作為 ContextHub release gate。
 - Codex 只能上傳 repo 的 `compose.prod.yml` 到 project staging；不得寫入 production
   `.env`、active Compose、`/etc/codex-deploy` 或 gateway 本身。
+
+## Shared network prerequisite
+
+第一次在全新 NAS 部署任何 app 前，先依 AiHomePlatform 的 NAS bootstrap runbook 建立並驗證
+`personal-ai-network`（driver `bridge`、scope `local`、`internal=false`）。Bootstrap 必須可重複執行：
+網路不存在時建立，已存在時只驗證相同設定，不刪除或重建。應用程式 gateway validate/deploy
+以網路已存在為前提；缺少網路時先完成平台 bootstrap，不要改成由 app Compose 建網路。
+
+目前 production NAS 的 `personal-ai-network` 已由舊 Compose project `prod` 建立，且帶有該 project
+的歷史 labels。這是既有網路的 provenance，不是重建提示。切換到 external declaration 時保留原
+network object、ID、設定與 labels；不要執行會刪除舊 Compose project/network 的 down 或 prune，
+也不要為了去除 labels 重建 bridge。若 validation 發現 network 不符合平台契約，先停止 app
+release，交由 platform bootstrap／維運流程處理。
 
 ## Agent 執行前檢查
 
@@ -28,6 +44,7 @@
 3. 記錄要部署的完整 commit SHA、`package.json` version、immutable image digest 與 workflow URL。
 4. 確認 NAS production health 仍可達；不要用本機測試冒充 live health。
 5. 所有 privileged gateway call 使用 `sudo -n`；失敗就立即停止，不要求或等待密碼。
+6. 確認平台 bootstrap 已驗證 `personal-ai-network`；app release 僅消費此 external network。
 
 ## Codex 標準 gateway 流程
 
@@ -56,6 +73,11 @@ Validate 失敗只修 repo `compose.prod.yml`，重新 upload + validate；不�
 Compose。Deploy 後仍須核對 private 8788／8443 health 的 version、commit、schema、audit、
 projection，並保留 gateway/health evidence。若 gateway 支援且確實需要 rollback，使用
 `deployment contexthub rollback`，不得改用 direct Docker。
+
+ContextHub gateway status 與上列 ContextHub health 是本專案 release evidence。Hermes 的 runtime
+configuration、tool discovery、Memory round-trip 與 `provider_verified` 狀態按
+[Hermes onboarding](HERMES-MCP-ONBOARDING.md) 分開驗收；Personal AI 也由自己的 app release
+流程管理，不是 ContextHub deployment 的 downstream health gate。
 
 ## Owner recovery-only 流程
 
