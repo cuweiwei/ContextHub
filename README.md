@@ -104,6 +104,12 @@ Compose，也不要直接執行 Docker。完整命令與驗收見
 [NAS Deployment Runbook](docs/NAS-DEPLOY-RUNBOOK.md)。`scripts/nas-deploy.sh` 與 libexec engine
 保留為歷史 owner-run recovery/evidence 路徑，不取代 shared gateway。
 
+Production Compose 將 ContextHub 接到平台管理的 external bridge `personal-ai-network`，並明確
+宣告 DNS alias `contexthub`，供 Hermes 以 `http://contexthub:8787` 連線。應用程式 release
+不建立或刪除此網路；全新 NAS 必須先完成平台 network bootstrap。既有 NAS 的網路需原地保留，
+包括舊 Compose project labels；詳見 NAS Deployment Runbook。ContextHub 自己的 deployment
+health/release evidence 與 Hermes product-client 驗收是兩個獨立結果。
+
 正式 CI/CD 會從 main 建立公開 GHCR immutable digest、SBOM、provenance，並把
 AiHomePlatform `schemaVersion: 1` release manifest 以
 `aihome-release-<commit>` artifact 發布（artifact 內路徑為 `release-manifest.json`）；

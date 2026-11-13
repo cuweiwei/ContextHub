@@ -449,7 +449,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: AppDeps): void
   app.post('/v1/agent-enrollment/exchange', async (req, reply) => {
     if (!deps.config.agentEnrollmentEnabled) return noStore(reply).code(404).send({ error: { code: 'feature_disabled', message: 'agent enrollment is disabled' } });
     if (!hasJsonContentType(req)) return noStore(reply).code(400).send({ error: { code: 'invalid_request', message: 'application/json is required' } });
-    const code = z.object({ code: z.string().min(20).max(200), client_metadata: z.record(z.string()).optional(), idempotency_key: z.string().min(1).max(200).optional() }).safeParse(req.body);
+    const code = z.object({ code: z.string().min(20).max(200), client_metadata: z.record(z.string(), z.string()).optional(), idempotency_key: z.string().min(1).max(200).optional() }).safeParse(req.body);
     if (!code.success) return noStore(reply).code(400).send({ error: { code: 'invalid_request', message: 'invalid enrollment request' } });
     const parsedCode = deps.enrollmentsRepo.parseV2Code(code.data.code);
     const idemClient = `enrollment:${parsedCode?.id ?? hashEnrollmentCode(code.data.code).slice(0, 24)}`;

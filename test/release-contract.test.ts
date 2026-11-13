@@ -47,6 +47,9 @@ describe('release and deployment contracts', () => {
       expect(composeText).toContain('AIHP_IMAGE_DIGEST: ${AIHP_IMAGE_DIGEST:-}');
       expect(composeText).toContain('172.17.0.1:18788:8787');
       expect(composeText).not.toContain('0.0.0.0:18788:8787');
+      expect(composeText).toMatch(/^    networks:\n      personal-ai-network:\n        aliases:\n          - contexthub$/m);
+      expect(composeText).toMatch(/^networks:\n  personal-ai-network:\n(?:[ \t]*#.*\n)*    external: true\n    name: personal-ai-network$/m);
+      expect(composeText).not.toMatch(/^\s+depends_on:/m);
       expect(generated).toMatchObject({
         schemaVersion: 1,
         serviceId: 'contexthub',
