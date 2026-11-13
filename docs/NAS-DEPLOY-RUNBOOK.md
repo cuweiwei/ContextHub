@@ -25,10 +25,30 @@
 
 ## Shared network prerequisite
 
-第一次在全新 NAS 部署任何 app 前，先依 AiHomePlatform 的 NAS bootstrap runbook 建立並驗證
+第一次在全新 NAS 部署任何 app 前，先由平台管理者建立並驗證
 `personal-ai-network`（driver `bridge`、scope `local`、`internal=false`）。Bootstrap 必須可重複執行：
 網路不存在時建立，已存在時只驗證相同設定，不刪除或重建。應用程式 gateway validate/deploy
 以網路已存在為前提；缺少網路時先完成平台 bootstrap，不要改成由 app Compose 建網路。
+
+平台管理者在**全新 NAS**執行以下指令。網路已存在時只檢查規格，並保留原有 network ID。
+
+```bash
+set -eu
+docker=/var/packages/ContainerManager/target/usr/bin/docker
+network=personal-ai-network
+
+if ! sudo -n "$docker" network inspect "$network" >/dev/null 2>&1; then
+  sudo -n "$docker" network create --driver bridge --scope local "$network"
+fi
+
+shape=$(sudo -n "$docker" network inspect \
+  --format '{{.Driver}} {{.Scope}} {{.Internal}}' "$network")
+if [ "$shape" != 'bridge local false' ]; then
+  printf 'personal-ai-network has unexpected shape: %s\n' "$shape" >&2
+  exit 1
+fi
+printf 'personal-ai-network verified: %s\n' "$shape"
+```
 
 目前 production NAS 的 `personal-ai-network` 已由舊 Compose project `prod` 建立，且帶有該 project
 的歷史 labels。這是既有網路的 provenance，不是重建提示。切換到 external declaration 時保留原

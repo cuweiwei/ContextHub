@@ -126,7 +126,11 @@ accepted-only prefetch 可用。它不證明 Hermes product client 已載入 run
 
 ## 目前 live evidence
 
-2026-09-16 本次最後一次非互動唯讀核對：Hermes `/api/health` 為 HTTP 200，
+2026-11-13，ContextHub 切換至平台管理的外部 bridge 後，Hermes runtime
+使用既有 personal credential 完成 `memory_prefetch`、`memory_search` 與
+`memory_sync` 的認證唯讀驗收。Production write 驗收使用隔離環境的測試資料。
+
+2026-09-16 的歷史核對：Hermes `/api/health` 為 HTTP 200，
 `runtime.durableRuntime.integrations.contexthub_memory_provider` 仍為
 `configured=false`、`status=unavailable`。NAS 非特權檔案可讀性檢查顯示預期
 secret 檔案 absent-or-inaccessible；這不能區分不存在與權限不足。
