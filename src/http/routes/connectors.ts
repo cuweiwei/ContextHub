@@ -6,7 +6,7 @@ import { sendError, idempotencyKeyFrom } from '../errors.js';
 
 export function registerConnectorRoutes(app: FastifyInstance, deps: AppDeps): void {
   app.post('/v1/connectors/runs', { preHandler: requireScope('write') }, async (req, reply) => {
-    const parsed = z.object({ connector: z.string().min(1).max(100), checkpoint_key: z.string().min(1).max(200), checkpoint_value: z.string().max(1000).nullable().optional(), status: z.enum(['ok', 'stale', 'failed']), counts: z.record(z.number().int().nonnegative()).optional(), idempotency_key: z.string().min(1).optional() }).safeParse(req.body);
+    const parsed = z.object({ connector: z.string().min(1).max(100), checkpoint_key: z.string().min(1).max(200), checkpoint_value: z.string().max(1000).nullable().optional(), status: z.enum(['ok', 'stale', 'failed']), counts: z.record(z.string(), z.number().int().nonnegative()).optional(), idempotency_key: z.string().min(1).optional() }).safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: { code: 'invalid_request', message: parsed.error.message } });
     const key = idempotencyKeyFrom(req.headers as Record<string, unknown>, parsed.data) ?? parsed.data.idempotency_key;
     if (!key) return reply.code(400).send({ error: { code: 'invalid_request', message: 'idempotency_key is required' } });
